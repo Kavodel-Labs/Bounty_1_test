@@ -118,6 +118,77 @@ Every report can be filtered to show exactly what you need to see. Here's what e
 
 ---
 
+## 🛠️ Filters SQL Configuration Reference
+
+This section shows the exact SQL code behind each filter for visual debugging and technical reference.
+
+### Complete Filters Table
+
+| Filter Name | Business Purpose | SQL Configuration | Metabase Type | Technical Notes |
+|-------------|------------------|-------------------|---------------|-----------------|
+| **brand** | Filter by specific casino/company | `[[ AND {{brand}} ]]`<br/>Maps to: `companies.name` | Field Filter | Direct match on company name |
+| **country** | Filter by player country | `[[ AND players.country = CASE {{country}}`<br/>`  WHEN 'Romania' THEN 'RO'`<br/>`  WHEN 'France' THEN 'FR'`<br/>`  WHEN 'Germany' THEN 'DE'`<br/>`  ... (30+ countries)`<br/>`END ]]` | Field Filter | Converts full name → ISO code |
+| **start_date** | Analysis period start | `start_input AS (`<br/>`  SELECT NULL::date WHERE FALSE`<br/>`  [[ UNION ALL SELECT {{start_date}}::date ]]`<br/>`)` | Date | Default: 31 days ago (daily)<br/>12 months ago (monthly) |
+| **end_date** | Analysis period end | `end_input AS (`<br/>`  SELECT NULL::date WHERE FALSE`<br/>`  [[ UNION ALL SELECT {{end_date}}::date ]]`<br/>`)` | Date | Default: today (CURRENT_DATE) |
+| **traffic_source** | Organic vs Affiliate players | `[[ AND CASE`<br/>`  WHEN {{traffic_source}} = 'Organic'`<br/>`    THEN players.affiliate_id IS NULL`<br/>`  WHEN {{traffic_source}} = 'Affiliate'`<br/>`    THEN players.affiliate_id IS NOT NULL`<br/>`  ELSE TRUE`<br/>`END ]]` | Text | NULL affiliate_id = Organic |
+| **affiliate_id** | Specific affiliate partner | `[[ AND {{affiliate_id}} ]]`<br/>Maps to: `players.affiliate_id` | Field Filter | Direct ID match |
+| **affiliate_name** | Affiliate name search | `[[ AND {{affiliate_name}} ]]`<br/>Maps to: `affiliates.name` | Field Filter | Name-based lookup |
+| **registration_launcher** | Device (OS / Browser) | `[[ AND CONCAT(players.os, ' / ',`<br/>`  players.browser) = {{registration_launcher}} ]]` | Field Filter | Format: "iOS / Safari"<br/>"Android / Chrome" |
+| **currency_filter** | Transaction currency | `[[ AND UPPER(COALESCE(`<br/>`  t.metadata->>'currency',`<br/>`  t.cash_currency,`<br/>`  players.wallet_currency,`<br/>`  companies.currency`<br/>`)) IN ({{currency_filter}}) ]]` | Text | Comma-separated: 'EUR','USD'<br/>Uses 4-level cascade |
+| **is_test_account** | Include/exclude test accounts | `[[ AND {{is_test_account}} ]]`<br/>Maps to: `players.is_test_account` | Field Filter | TRUE = include tests<br/>FALSE = exclude tests |
+
+### Filtered Players Pattern (Used in All Reports)
+
+```sql
+-- Core pattern: filtered_players CTE
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    -- Brand filter
+    [[ AND {{brand}} ]]
+
+    -- Country filter with ISO code mapping
+    [[ AND players.country = CASE {{country}}
+      WHEN 'Romania' THEN 'RO'
+      WHEN 'France' THEN 'FR'
+      WHEN 'Germany' THEN 'DE'
+      WHEN 'Cyprus' THEN 'CY'
+      WHEN 'Poland' THEN 'PL'
+      -- ... 25+ more countries
+    END ]]
+
+    -- Traffic source: Organic (NULL affiliate_id) vs Affiliate (NOT NULL)
+    [[ AND CASE
+      WHEN {{traffic_source}} = 'Organic' THEN players.affiliate_id IS NULL
+      WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+      ELSE TRUE
+    END ]]
+
+    -- Specific affiliate filters
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+
+    -- Device filter: OS + Browser concatenated
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- Test account filter
+    [[ AND {{is_test_account}} ]]
+)
+```
+
+**How it's used:**
+```sql
+-- Every metric query joins to filtered_players
+FROM transactions t
+INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+```
+
+This ensures ALL metrics respect the user's filter selections.
+
+---
+
 ## 📈 Understanding the Metrics
 
 ### Registration & Acquisition Metrics
@@ -302,6 +373,404 @@ Every report can be filtered to show exactly what you need to see. Here's what e
 - **What it means:** The month a player first deposited (or registered)
 - **Example:** "January 2025" cohort = all players who first deposited in Jan 2025
 - **Why it matters:** Groups players by acquisition period
+
+---
+
+## 🧮 Metrics SQL Configuration Reference
+
+This section shows the exact SQL formulas behind each metric for visual debugging and technical modifications.
+
+### Registration & Acquisition Metrics - SQL Details
+
+| Metric | Business Formula | SQL Implementation | Data Sources | Filters Applied |
+|--------|------------------|-------------------|--------------|-----------------|
+| **#Registrations** | Count of new accounts | ```sql
+COUNT(DISTINCT players.id) FILTER (
+  WHERE players.created_at >= report_date
+    AND players.created_at < report_date + INTERVAL '1 day'
+)
+``` | `players.id`<br/>`players.created_at` | filtered_players,<br/>date range |
+| **Complete Registrations** | Verified email accounts | ```sql
+COUNT(DISTINCT players.id) FILTER (
+  WHERE players.email_verified = TRUE
+    AND players.created_at >= report_date
+)
+``` | `players.email_verified` | filtered_players,<br/>date range |
+| **#FTDs (First-Time Depositors)** | Players with first deposit | ```sql
+-- Step 1: Find first deposit per player
+ftd_first AS (
+  SELECT player_id, MIN(created_at) AS first_deposit_ts
+  FROM transactions
+  WHERE transaction_category = 'deposit'
+    AND transaction_type = 'credit'
+    AND status = 'completed'
+    AND balance_type = 'withdrawable'
+  GROUP BY player_id
+)
+-- Step 2: Count by date
+COUNT(DISTINCT player_id)
+  WHERE DATE_TRUNC('day', first_deposit_ts) = report_date
+``` | `transactions` table<br/>Category: deposit<br/>Type: credit<br/>Status: completed | filtered_players,<br/>currency_filter,<br/>date range |
+| **#New FTDs** | FTDs in registration month | ```sql
+COUNT(DISTINCT player_id) FILTER (
+  WHERE DATE_TRUNC('month', first_deposit_ts)
+      = DATE_TRUNC('month', registration_ts)
+)
+``` | `players.created_at`<br/>`ftd_first.first_deposit_ts` | Same as FTDs +<br/>month match |
+| **#Old FTDs** | FTDs after registration month | ```sql
+COUNT(DISTINCT player_id) FILTER (
+  WHERE DATE_TRUNC('month', first_deposit_ts)
+      > DATE_TRUNC('month', registration_ts)
+)
+``` | Same as New FTDs | Same as New FTDs |
+| **#D0 FTDs** | Same-day deposits | ```sql
+COUNT(DISTINCT player_id) FILTER (
+  WHERE first_deposit_ts::date = registration_ts::date
+)
+``` | Both timestamps cast to date | Same as FTDs +<br/>date match |
+| **Conversion Rate** | FTD / Registrations × 100 | ```sql
+CASE
+  WHEN total_registrations > 0
+  THEN ROUND((ftd_count::numeric / total_registrations) * 100, 2)
+  ELSE NULL
+END
+``` | Calculated from above | Derived metric |
+
+### Financial Metrics - SQL Details
+
+| Metric | Business Formula | SQL Implementation | Transaction Filters | EUR Conversion |
+|--------|------------------|-------------------|---------------------|----------------|
+| **Deposits Amount** | Sum of deposit transactions | ```sql
+SUM(
+  CASE
+    WHEN t.metadata->>'currency' = 'EUR'
+      THEN t.amount
+    WHEN t.metadata->>'currency' IS NOT NULL
+      THEN t.amount / COALESCE(
+        (t.metadata->>'exchange_rate')::numeric, 1
+      )
+    ELSE t.amount
+  END
+) FILTER (
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'
+)
+``` | Category: `deposit`<br/>Type: `credit`<br/>Status: `completed`<br/>Balance: `withdrawable` | All amounts → EUR<br/>Using exchange_rate<br/>from metadata |
+| **Withdrawals Amount** | Sum of withdrawal transactions | ```sql
+SUM(
+  CASE
+    WHEN t.metadata->>'currency' = 'EUR'
+      THEN t.amount
+    WHEN t.metadata->>'currency' IS NOT NULL
+      THEN t.amount / COALESCE(
+        (t.metadata->>'exchange_rate')::numeric, 1
+      )
+    ELSE t.amount
+  END
+) FILTER (
+  WHERE t.transaction_category = 'withdrawal'
+    AND t.transaction_type = 'debit'
+    AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'
+)
+``` | Category: `withdrawal`<br/>Type: `debit`<br/>Status: `completed`<br/>Balance: `withdrawable` | Same as Deposits |
+| **CashFlow** | Deposits - Withdrawals | ```sql
+(deposit_amount - withdrawal_amount)
+``` | N/A (calculated) | Already in EUR |
+| **Unique Depositors** | Distinct players with deposits | ```sql
+COUNT(DISTINCT t.player_id) FILTER (
+  WHERE t.transaction_category = 'deposit'
+    AND t.status = 'completed'
+)
+``` | Same as Deposits Amount | N/A (count metric) |
+| **#Deposits** | Count of deposit transactions | ```sql
+COUNT(*) FILTER (
+  WHERE t.transaction_category = 'deposit'
+    AND t.status = 'completed'
+)
+``` | Same as Deposits Amount | N/A (count metric) |
+
+### Gaming Activity Metrics - SQL Details
+
+| Metric | Business Formula | SQL Implementation | Transaction Filters | Balance Type |
+|--------|------------------|-------------------|---------------------|--------------|
+| **Active Players** | Players with any bet | ```sql
+COUNT(DISTINCT t.player_id) FILTER (
+  WHERE t.transaction_category = 'game_bet'
+    AND t.status = 'completed'
+)
+``` | Category: `game_bet`<br/>Status: `completed` | Any balance type |
+| **Real Active Players** | Players with cash bets | ```sql
+COUNT(DISTINCT t.player_id) FILTER (
+  WHERE t.transaction_category = 'game_bet'
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+)
+``` | Category: `game_bet`<br/>Balance: `withdrawable`<br/>Status: `completed` | withdrawable only |
+| **Cash Bet** | Sum of real money bets | ```sql
+SUM(
+  CASE
+    WHEN t.metadata->>'currency' = 'EUR' THEN t.amount
+    ELSE t.amount / COALESCE(
+      (t.metadata->>'exchange_rate')::numeric, 1
+    )
+  END
+) FILTER (
+  WHERE t.transaction_category = 'game_bet'
+    AND t.transaction_type = 'debit'
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+)
+``` | Category: `game_bet`<br/>Type: `debit`<br/>Balance: `withdrawable`<br/>Status: `completed` | withdrawable<br/>(real money) |
+| **Cash Win** | Sum of cash winnings | ```sql
+SUM(
+  CASE
+    WHEN t.metadata->>'currency' = 'EUR' THEN t.amount
+    ELSE t.amount / COALESCE(
+      (t.metadata->>'exchange_rate')::numeric, 1
+    )
+  END
+) FILTER (
+  WHERE t.transaction_category = 'game_bet'
+    AND t.transaction_type = 'credit'
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+)
+``` | Category: `game_bet`<br/>Type: `credit`<br/>Balance: `withdrawable`<br/>Status: `completed` | withdrawable<br/>(real money) |
+| **Promo Bet** | Sum of bonus money bets | ```sql
+SUM(
+  CASE
+    WHEN t.metadata->>'currency' = 'EUR' THEN t.amount
+    ELSE t.amount / COALESCE(
+      (t.metadata->>'exchange_rate')::numeric, 1
+    )
+  END
+) FILTER (
+  WHERE t.transaction_category = 'bonus'
+    AND t.transaction_type = 'debit'
+    AND t.balance_type = 'non-withdrawable'
+    AND t.status = 'completed'
+)
+``` | Category: `bonus`<br/>Type: `debit`<br/>Balance: `non-withdrawable`<br/>Status: `completed` | non-withdrawable<br/>(bonus money) |
+| **Promo Win** | Sum of bonus winnings | ```sql
+SUM(
+  CASE
+    WHEN t.metadata->>'currency' = 'EUR' THEN t.amount
+    ELSE t.amount / COALESCE(
+      (t.metadata->>'exchange_rate')::numeric, 1
+    )
+  END
+) FILTER (
+  WHERE t.transaction_category = 'bonus'
+    AND t.transaction_type = 'credit'
+    AND t.balance_type = 'non-withdrawable'
+    AND t.status = 'completed'
+)
+``` | Category: `bonus`<br/>Type: `credit`<br/>Balance: `non-withdrawable`<br/>Status: `completed` | non-withdrawable<br/>(bonus money) |
+| **Turnover** | Total wagering (cash + promo) | ```sql
+(cash_bet + promo_bet)
+``` | N/A (calculated) | Already in EUR |
+
+### Revenue Metrics - SQL Details
+
+| Metric | Business Formula | SQL Implementation | Calculation Logic | When to Use |
+|--------|------------------|-------------------|-------------------|-------------|
+| **GGR (Gross Gaming Revenue)** | (Bets - Wins) | ```sql
+((cash_bet + promo_bet) - (cash_win + promo_win))
+``` | House edge profit<br/>Before bonus costs | Core gaming profitability |
+| **Cash GGR** | Cash Bet - Cash Win | ```sql
+(cash_bet - cash_win)
+``` | Real money only<br/>No bonus activity | True cash profit |
+| **NGR (Net Gaming Revenue)** | Same as GGR | ```sql
+-- Same calculation as GGR
+((cash_bet + promo_bet) - (cash_win + promo_win))
+``` | No difference in this platform<br/>(Some platforms subtract fees here) | Alternative name for GGR |
+| **Bonus Converted** | Bonus → cash conversions | ```sql
+SUM(
+  CASE
+    WHEN t.metadata->>'currency' = 'EUR' THEN t.amount
+    ELSE t.amount / COALESCE(
+      (t.metadata->>'exchange_rate')::numeric, 1
+    )
+  END
+) FILTER (
+  WHERE t.transaction_category = 'bonus_completion'
+    AND t.transaction_type = 'credit'
+    AND t.status = 'completed'
+)
+``` | Category: `bonus_completion`<br/>Type: `credit`<br/>Status: `completed` | Cost of successful bonuses |
+| **Bonus Cost** | Total bonus expense | ```sql
+-- Currently same as Bonus Converted
+(bonus_converted)
+``` | Same implementation<br/>for now | Marketing expense |
+| **Bonus Ratio (GGR)** | Bonus cost % of revenue | ```sql
+CASE
+  WHEN ggr > 0
+  THEN ROUND((bonus_cost / ggr) * 100, 2)
+  ELSE NULL
+END
+``` | Percentage calculation<br/>NULL if GGR = 0 | Bonus efficiency |
+| **Bonus Ratio (Deposits)** | Bonus cost % of deposits | ```sql
+CASE
+  WHEN deposit_amount > 0
+  THEN ROUND((bonus_cost / deposit_amount) * 100, 2)
+  ELSE NULL
+END
+``` | Percentage calculation<br/>NULL if deposits = 0 | Alternative bonus view |
+| **Payout %** | Win / Bet × 100 | ```sql
+CASE
+  WHEN cash_bet > 0
+  THEN ROUND((cash_win / cash_bet) * 100, 2)
+  ELSE NULL
+END
+``` | Player return rate<br/>Regulatory metric | RTP (Return to Player) |
+| **%CashFlow to GGR** | CashFlow / GGR × 100 | ```sql
+CASE
+  WHEN ggr > 0
+  THEN ROUND((cashflow / ggr) * 100, 2)
+  ELSE NULL
+END
+``` | Cash efficiency<br/>Financial health | Cash flow analysis |
+| **Revenue (Net Revenue)** | GGR - Bonus Cost | ```sql
+(ggr - bonus_cost)
+``` | Final bottom line<br/>After all costs | True profitability |
+
+### Cohort-Specific Metrics - SQL Details
+
+| Metric | Business Formula | SQL Implementation | Cohort Logic | Month Calculation |
+|--------|------------------|-------------------|--------------|-------------------|
+| **LTV (Lifetime Value)** | Total Deposits / FTD Count | ```sql
+CASE
+  WHEN ftd_count > 0
+  THEN ROUND(total_deposits / ftd_count, 2)
+  ELSE 0
+END
+``` | Lifetime = all activity<br/>since registration | N/A (summary metric) |
+| **Retention Rate** | Active Month X / Active Month 0 × 100 | ```sql
+-- Example: Depositors Cohort %
+CASE
+  WHEN "Month 0" > 0
+  THEN ROUND(("Month 3"::numeric / "Month 0") * 100, 2)
+  ELSE NULL
+END
+``` | Cohort = first deposit month<br/>Month 0 = 100% | Month X = X months<br/>after first deposit |
+| **Cohort Size** | Players in cohort | ```sql
+COUNT(DISTINCT player_id) FILTER (
+  WHERE DATE_TRUNC('month', first_deposit_ts) = cohort_month
+)
+``` | Grouped by first action<br/>(deposit or registration) | `DATE_TRUNC('month', ...)` |
+| **Month 0 Activity** | Activity in first month | ```sql
+SUM(amount) FILTER (
+  WHERE DATE_TRUNC('month', activity_ts)
+      = DATE_TRUNC('month', first_deposit_ts)
+)
+``` | Same month as first deposit | Month difference = 0 |
+| **Month X Activity** | Activity X months later | ```sql
+SUM(amount) FILTER (
+  WHERE DATE_TRUNC('month', activity_ts)
+      = DATE_TRUNC('month', first_deposit_ts) + INTERVAL 'X month'
+)
+``` | Offset by X months | Month difference = X |
+
+### Transaction Type Configuration Matrix
+
+This table shows exactly which transaction attributes create each metric type:
+
+| Metric Category | `transaction_category` | `transaction_type` | `balance_type` | `status` | EUR Conversion |
+|-----------------|----------------------|-------------------|----------------|----------|----------------|
+| **Deposits** | `deposit` | `credit` | `withdrawable` | `completed` | ✅ Yes |
+| **Withdrawals** | `withdrawal` | `debit` | `withdrawable` | `completed` | ✅ Yes |
+| **Cash Bet** | `game_bet` | `debit` | `withdrawable` | `completed` | ✅ Yes |
+| **Cash Win** | `game_bet` | `credit` | `withdrawable` | `completed` | ✅ Yes |
+| **Promo Bet** | `bonus` | `debit` | `non-withdrawable` | `completed` | ✅ Yes |
+| **Promo Win** | `bonus` | `credit` | `non-withdrawable` | `completed` | ✅ Yes |
+| **Bonus Converted** | `bonus_completion` | `credit` | ANY | `completed` | ✅ Yes |
+| **FTD Deposits** | `deposit` + first per player | `credit` | `withdrawable` | `completed` | ✅ Yes |
+
+### Currency Conversion SQL Pattern
+
+**Used in all financial metrics:**
+
+```sql
+-- EUR Conversion Logic (applied to every amount field)
+CASE
+  -- Already EUR - no conversion needed
+  WHEN t.metadata->>'currency' = 'EUR' THEN t.amount
+
+  -- Has currency + exchange rate in metadata
+  WHEN t.metadata->>'currency' IS NOT NULL THEN
+    t.amount / COALESCE(
+      (t.metadata->>'exchange_rate')::numeric,
+      1  -- Fallback to 1:1 if rate missing
+    )
+
+  -- No metadata - assume already in EUR or use amount as-is
+  ELSE t.amount
+END
+```
+
+**4-Level Currency Resolution (for filtering):**
+
+```sql
+UPPER(COALESCE(
+  t.metadata->>'currency',      -- 1. Transaction-specific (highest priority)
+  t.cash_currency,              -- 2. Transaction default
+  players.wallet_currency,      -- 3. Player account default
+  companies.currency            -- 4. Company default (fallback)
+))
+```
+
+### Common SQL Patterns for Debugging
+
+**Pattern 1: Date Range Filtering**
+```sql
+-- Daily reports
+WHERE t.created_at >= report_date
+  AND t.created_at < report_date + INTERVAL '1 day'
+
+-- Monthly reports
+WHERE DATE_TRUNC('month', t.created_at) = cohort_month
+```
+
+**Pattern 2: First Transaction Detection**
+```sql
+-- Find first deposit per player
+WITH ftd_first AS (
+  SELECT
+    player_id,
+    MIN(created_at) AS first_deposit_ts
+  FROM transactions
+  WHERE transaction_category = 'deposit'
+    AND transaction_type = 'credit'
+    AND status = 'completed'
+  GROUP BY player_id
+)
+```
+
+**Pattern 3: Cohort Month Calculation**
+```sql
+-- Assign player to cohort
+DATE_TRUNC('month', first_deposit_ts) AS cohort_month
+
+-- Calculate months since cohort
+DATE_PART('year', activity_ts) * 12 + DATE_PART('month', activity_ts)
+  - (DATE_PART('year', first_deposit_ts) * 12 + DATE_PART('month', first_deposit_ts))
+  AS months_since_first
+```
+
+**Pattern 4: NULL Safety in Calculations**
+```sql
+-- Always handle division by zero
+CASE
+  WHEN denominator > 0 THEN numerator / denominator
+  ELSE NULL  -- or 0, depending on business logic
+END
+
+-- Always handle NULL amounts
+COALESCE(SUM(amount), 0)
+```
 
 ---
 
