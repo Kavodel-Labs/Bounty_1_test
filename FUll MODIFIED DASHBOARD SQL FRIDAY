@@ -1,0 +1,4386 @@
+NEW CODE BEING USED FOR ALL MY REPORTS:
+
+/* =========================
+   DAILY KPIs — MULTI-DAY with SUMMARY ROW
+   [NEW] Implements standardized EUR currency conversion with NULL safety
+   ========================= */
+
+WITH
+/* --- Optional inputs: empty by default, 1 row when provided --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize window (no inputs → last 31 days to today) --- */
+bounds_raw AS (
+  SELECT
+    COALESCE((SELECT MAX(end_date) FROM end_input), CURRENT_DATE) AS end_date_raw,
+    (SELECT MAX(start_date) FROM start_input) AS start_date_raw
+),
+bounds AS (
+  SELECT
+    end_date_raw AS end_date,
+    CASE
+      WHEN start_date_raw IS NULL THEN end_date_raw - INTERVAL '31 day'
+      WHEN start_date_raw > end_date_raw THEN end_date_raw
+      ELSE start_date_raw
+    END AS start_date
+  FROM bounds_raw
+),
+
+/* --- Daily series over the chosen window --- */
+date_series AS (
+  SELECT 
+    d::date AS report_date,
+    d AS start_ts,
+    LEAST(d + INTERVAL '1 day', NOW()) AS end_ts
+  FROM generate_series(
+    (SELECT start_date FROM bounds),
+    (SELECT end_date FROM bounds),
+    INTERVAL '1 day'
+  ) AS d
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]
+    [[ AND players.country = CASE {{country}}
+      WHEN 'Romania' THEN 'RO'
+      WHEN 'France' THEN 'FR'
+      WHEN 'Germany' THEN 'DE'
+      WHEN 'Cyprus' THEN 'CY'
+      WHEN 'Poland' THEN 'PL'
+      WHEN 'Spain' THEN 'ES'
+      WHEN 'Italy' THEN 'IT'
+      WHEN 'Canada' THEN 'CA'
+      WHEN 'Australia' THEN 'AU'
+      WHEN 'United Kingdom' THEN 'GB'
+      WHEN 'Finland' THEN 'FI'
+      WHEN 'Albania' THEN 'AL'
+      WHEN 'Austria' THEN 'AT'
+      WHEN 'Belgium' THEN 'BE'
+      WHEN 'Brazil' THEN 'BR'
+      WHEN 'Bulgaria' THEN 'BG'
+      WHEN 'Georgia' THEN 'GE'
+      WHEN 'Greece' THEN 'GR'
+      WHEN 'Hungary' THEN 'HU'
+      WHEN 'India' THEN 'IN'
+      WHEN 'Netherlands' THEN 'NL'
+      WHEN 'Portugal' THEN 'PT'
+      WHEN 'Singapore' THEN 'SG'
+      WHEN 'Turkey' THEN 'TR'
+      WHEN 'United Arab Emirates' THEN 'AE'
+      WHEN 'Afghanistan' THEN 'AF'
+      WHEN 'Armenia' THEN 'AM'
+      WHEN 'Denmark' THEN 'DK'
+      WHEN 'Algeria' THEN 'DZ'
+      WHEN 'Andorra' THEN 'AD'
+    END ]]
+    [[ AND CASE
+      WHEN {{traffic_source}} = 'Organic' THEN players.affiliate_id IS NULL
+      WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+      ELSE TRUE
+    END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+    [[ AND {{is_test_account}} ]]
+),
+
+/* ---------- GLOBAL FTD ---------- */
+ftd_first AS (
+  SELECT
+    t.player_id,
+    MIN(t.created_at) AS first_deposit_ts
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+player_reg AS (
+  SELECT
+    p.id AS player_id,
+    p.created_at AS registration_ts,
+    p.email_verified,
+    c.name AS brand_name
+  FROM players p
+  INNER JOIN filtered_players fp ON p.id = fp.player_id
+  LEFT JOIN companies c ON p.company_id = c.id
+),
+
+registrations AS (
+  SELECT
+    ds.report_date,
+    COUNT(pr.*) AS total_registrations,
+    COUNT(CASE WHEN pr.email_verified = TRUE THEN 1 END) AS complete_registrations
+  FROM date_series ds
+  LEFT JOIN player_reg pr
+    ON pr.registration_ts >= ds.start_ts
+    AND pr.registration_ts < ds.end_ts
+  GROUP BY ds.report_date
+),
+
+ftds AS (
+  SELECT
+    DATE_TRUNC('day', ff.first_deposit_ts)::date AS report_date,
+    pr.player_id,
+    pr.registration_ts,
+    ff.first_deposit_ts
+  FROM ftd_first ff
+  JOIN player_reg pr ON pr.player_id = ff.player_id
+),
+
+ftd_metrics AS (
+  SELECT
+    ds.report_date,
+    COUNT(DISTINCT f.player_id) AS ftds_count,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('month', f.registration_ts) = DATE_TRUNC('month', f.first_deposit_ts)) AS new_ftds,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('month', f.registration_ts) < DATE_TRUNC('month', f.first_deposit_ts)) AS old_ftds,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('day', f.registration_ts) = DATE_TRUNC('day', f.first_deposit_ts)) AS d0_ftds,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('day', f.registration_ts) <> DATE_TRUNC('day', f.first_deposit_ts)) AS late_ftds
+  FROM date_series ds
+  LEFT JOIN ftds f ON f.report_date = ds.report_date
+  GROUP BY ds.report_date
+),
+
+/* ---------- DEPOSITS (WITH NULL-SAFE CURRENCY LOGIC) ---------- */
+deposit_metrics AS (
+  SELECT
+    ds.report_date,
+    COUNT(DISTINCT t.player_id) FILTER (
+      WHERE t.transaction_category='deposit'
+        AND t.transaction_type='credit'
+        AND t.status='completed'
+        AND t.balance_type='withdrawable'
+    ) AS unique_depositors,
+    COUNT(*) FILTER (
+      WHERE t.transaction_category='deposit'
+        AND t.transaction_type='credit'
+        AND t.status='completed'
+        AND t.balance_type='withdrawable'
+    ) AS deposits_count,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_category='deposit'
+       AND t.transaction_type='credit'
+       AND t.status='completed'
+       AND t.balance_type='withdrawable'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)  -- NULL-safe EUR conversion
+        ELSE t.amount 
+      END 
+    END), 0) AS deposits_amount
+  FROM date_series ds
+  LEFT JOIN transactions t
+    ON t.created_at >= ds.start_ts
+    AND t.created_at < ds.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ds.report_date
+),
+
+/* ---------- WITHDRAWALS (WITH NULL-SAFE CURRENCY LOGIC) ---------- */
+withdrawal_metrics AS (
+  SELECT
+    ds.report_date,
+    COUNT(t.id) FILTER (
+      WHERE t.transaction_category='withdrawal'
+        AND t.transaction_type='debit'
+        AND t.balance_type='withdrawable'
+        AND t.status='completed'
+    ) AS withdrawals_count,
+    COALESCE(SUM(ABS(
+      CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    )) FILTER (
+      WHERE t.transaction_category='withdrawal'
+        AND t.transaction_type='debit'
+        AND t.balance_type='withdrawable'
+        AND t.status='completed'
+    ), 0) AS withdrawals_amount,
+    COALESCE(SUM(ABS(
+      CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    )) FILTER (
+      WHERE t.transaction_category='withdrawal'
+        AND t.transaction_type='debit'
+        AND t.balance_type='withdrawable'
+        AND t.status='cancelled'
+    ), 0) AS withdrawals_cancelled
+  FROM date_series ds
+  LEFT JOIN transactions t
+    ON t.created_at >= ds.start_ts
+    AND t.created_at < ds.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ds.report_date
+),
+
+/* ---------- ACTIVE PLAYERS ---------- */
+active_players AS (
+  SELECT
+    ds.report_date,
+    COUNT(DISTINCT CASE WHEN t.transaction_category='game_bet' THEN t.player_id END) AS active_players_count,
+    COUNT(DISTINCT CASE WHEN t.transaction_category='game_bet' AND t.balance_type='withdrawable' THEN t.player_id END) AS real_active_players
+  FROM date_series ds
+  LEFT JOIN transactions t
+    ON t.created_at >= ds.start_ts
+    AND t.created_at < ds.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ds.report_date
+),
+
+/* ---------- BETTING METRICS (WITH NULL-SAFE CURRENCY LOGIC) ---------- */
+betting_metrics AS (
+  SELECT
+    ds.report_date,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='debit'
+       AND t.transaction_category='game_bet'
+       AND t.balance_type='withdrawable'
+       AND t.status='completed'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS cash_bet,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='credit'
+       AND t.transaction_category='game_bet'
+       AND t.balance_type='withdrawable'
+       AND t.status='completed'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS cash_win,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='debit'
+       AND t.transaction_category='bonus'
+       AND t.balance_type='non-withdrawable'
+       AND t.status='completed'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS promo_bet,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='credit'
+       AND t.status='completed'
+       AND t.balance_type='non-withdrawable'
+       AND t.transaction_category = 'bonus'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS promo_win
+  FROM date_series ds
+  LEFT JOIN transactions t
+    ON t.created_at >= ds.start_ts
+    AND t.created_at < ds.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ds.report_date
+),
+
+/* ---------- BONUS METRICS (WITH NULL-SAFE CURRENCY LOGIC) ---------- */
+bonus_converted AS (
+  SELECT
+    ds.report_date,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='credit'
+       AND t.transaction_category='bonus_completion'
+       AND t.status='completed'
+       AND t.balance_type='withdrawable'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS bonus_converted_amount
+  FROM date_series ds
+  LEFT JOIN transactions t
+    ON t.created_at >= ds.start_ts
+    AND t.created_at < ds.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ds.report_date
+),
+
+bonus_cost AS (
+  SELECT
+    ds.report_date,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='credit'
+       AND t.balance_type='withdrawable'
+       AND t.status='completed'
+       AND t.transaction_category='bonus_completion'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS total_bonus_cost
+  FROM date_series ds
+  LEFT JOIN transactions t
+    ON t.created_at >= ds.start_ts
+    AND t.created_at < ds.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ds.report_date
+),
+
+/* ---------- PREPARE DAILY DATA ---------- */
+daily_data AS (
+  SELECT 
+    0 as sort_order,
+    ds.report_date::text AS "Date",
+    COALESCE(r.total_registrations, 0) AS "#Registrations",
+    COALESCE(fm.ftds_count, 0) AS "#FTDs",
+    COALESCE(fm.new_ftds, 0) AS "#New FTDs",
+    ROUND(CASE WHEN COALESCE(fm.ftds_count,0) > 0 
+               THEN fm.new_ftds::numeric / fm.ftds_count * 100 ELSE 0 END, 2) AS "%New FTDs",
+    COALESCE(fm.old_ftds, 0) AS "#Old FTDs",
+    ROUND(CASE WHEN COALESCE(fm.ftds_count,0) > 0 
+               THEN fm.old_ftds::numeric / fm.ftds_count * 100 ELSE 0 END, 2) AS "% Old FTDs",
+    COALESCE(fm.d0_ftds, 0) AS "#D0 FTDs",
+    ROUND(CASE WHEN COALESCE(fm.ftds_count,0) > 0 
+               THEN fm.d0_ftds::numeric / fm.ftds_count * 100 ELSE 0 END, 2) AS "%D0 FTDs",
+    COALESCE(fm.late_ftds, 0) AS "#Late FTDs",
+    ROUND(CASE WHEN COALESCE(r.total_registrations,0) > 0 
+               THEN COALESCE(fm.ftds_count,0)::numeric / r.total_registrations * 100 ELSE 0 END, 2) AS "%Conversion total reg",
+    ROUND(CASE WHEN COALESCE(r.complete_registrations,0) > 0 
+               THEN COALESCE(fm.ftds_count,0)::numeric / r.complete_registrations * 100 ELSE 0 END, 2) AS "%Conversion complete reg",
+    COALESCE(dm.unique_depositors, 0) AS "Unique Depositors",
+    COALESCE(dm.deposits_count, 0) AS "#Deposits",
+    ROUND(COALESCE(dm.deposits_amount, 0), 2) AS "Deposits Amount",
+    COALESCE(wm.withdrawals_count, 0) AS "#Withdrawals",
+    ROUND(COALESCE(wm.withdrawals_amount, 0), 2) AS "Withdrawals Amount",
+    ROUND(COALESCE(wm.withdrawals_cancelled, 0), 2) AS "Withdrawals Amount Canceled",
+    ROUND(CASE WHEN COALESCE(dm.deposits_amount,0) > 0 
+               THEN COALESCE(wm.withdrawals_amount,0) / dm.deposits_amount * 100 ELSE 0 END, 2) AS "%Withdrawals/Deposits",
+    ROUND(COALESCE(dm.deposits_amount,0) - COALESCE(wm.withdrawals_amount, 0), 2) AS "CashFlow",
+    COALESCE(ap.active_players_count, 0) AS "Active Players",
+    COALESCE(ap.real_active_players, 0) AS "Real Active Players",
+    ROUND(COALESCE(bet.cash_bet, 0), 2) AS "Cash Bet",
+    ROUND(COALESCE(bet.cash_win, 0), 2) AS "Cash Win",
+    ROUND(COALESCE(bet.promo_bet, 0), 2) AS "Promo bet",
+    ROUND(COALESCE(bet.promo_win, 0), 2) AS "Promo Win",
+    ROUND(COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0), 2) AS "Turnover",
+    ROUND(COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0), 2) AS "Turnover Casino",
+    ROUND(COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)
+        - COALESCE(bet.cash_win,0)
+        - COALESCE(bet.promo_win,0), 2) AS "GGR",
+    ROUND(COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)
+        - COALESCE(bet.cash_win,0)
+        - COALESCE(bet.promo_win,0), 2) AS "GGR Casino",
+    ROUND(COALESCE(bet.cash_bet,0) - COALESCE(bet.cash_win,0), 2) AS "Cash GGR",
+    ROUND(COALESCE(bet.cash_bet,0) - COALESCE(bet.cash_win,0), 2) AS "Cash GGR Casino",
+    ROUND(COALESCE(bc.bonus_converted_amount, 0), 2) AS "Bonus Converted (Gross)",
+    ROUND(COALESCE(bcost.total_bonus_cost, 0), 2) AS "Bonus Cost",
+    ROUND(CASE 
+        WHEN (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)
+             - COALESCE(bet.cash_win,0)
+             - COALESCE(bet.promo_win,0)) > 0 
+        THEN COALESCE(bcost.total_bonus_cost,0) / 
+             (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)
+             - COALESCE(bet.cash_win,0)
+             - COALESCE(bet.promo_win,0)) * 100 
+        ELSE 0 END, 2) AS "Bonus Ratio (GGR)",
+    ROUND(CASE WHEN COALESCE(dm.deposits_amount,0) > 0 
+               THEN COALESCE(bcost.total_bonus_cost,0) / dm.deposits_amount * 100 ELSE 0 END, 2) AS "Bonus Ratio (Deposits)",
+    ROUND(CASE 
+        WHEN (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)) > 0 
+        THEN (COALESCE(bet.cash_win,0) + COALESCE(bet.promo_win,0)) / 
+             (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)) * 100 
+        ELSE 0 END, 2) AS "Payout %",
+    ROUND(CASE 
+        WHEN (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)
+             - COALESCE(bet.cash_win,0)
+             - COALESCE(bet.promo_win,0)) > 0
+        THEN (COALESCE(dm.deposits_amount,0) - COALESCE(wm.withdrawals_amount,0)) /
+             (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)
+             - COALESCE(bet.cash_win,0)
+             - COALESCE(bet.promo_win,0)) * 100
+        ELSE 0 END, 2) AS "%CashFlow to GGR"
+  FROM date_series ds
+  LEFT JOIN registrations r ON r.report_date = ds.report_date
+  LEFT JOIN ftd_metrics fm ON fm.report_date = ds.report_date
+  LEFT JOIN deposit_metrics dm ON dm.report_date = ds.report_date
+  LEFT JOIN withdrawal_metrics wm ON wm.report_date = ds.report_date
+  LEFT JOIN active_players ap ON ap.report_date = ds.report_date
+  LEFT JOIN betting_metrics bet ON bet.report_date = ds.report_date
+  LEFT JOIN bonus_converted bc ON bc.report_date = ds.report_date
+  LEFT JOIN bonus_cost bcost ON bcost.report_date = ds.report_date
+)
+
+/* ========== FINAL OUTPUT WITH TOTAL ROW ========== */
+SELECT 
+  -1 as sort_order,
+  'TOTAL' AS "Date",
+  SUM("#Registrations") AS "#Registrations",
+  SUM("#FTDs") AS "#FTDs",
+  SUM("#New FTDs") AS "#New FTDs",
+  ROUND(CASE WHEN SUM("#FTDs") > 0 
+             THEN SUM("#New FTDs")::numeric / SUM("#FTDs") * 100 ELSE 0 END, 2) AS "%New FTDs",
+  SUM("#Old FTDs") AS "#Old FTDs",
+  ROUND(CASE WHEN SUM("#FTDs") > 0 
+             THEN SUM("#Old FTDs")::numeric / SUM("#FTDs") * 100 ELSE 0 END, 2) AS "% Old FTDs",
+  SUM("#D0 FTDs") AS "#D0 FTDs",
+  ROUND(CASE WHEN SUM("#FTDs") > 0 
+             THEN SUM("#D0 FTDs")::numeric / SUM("#FTDs") * 100 ELSE 0 END, 2) AS "%D0 FTDs",
+  SUM("#Late FTDs") AS "#Late FTDs",
+  ROUND(CASE WHEN SUM("#Registrations") > 0 
+             THEN SUM("#FTDs")::numeric / SUM("#Registrations") * 100 ELSE 0 END, 2) AS "%Conversion total reg",
+  
+  -- Complete registration conversion for entire period
+  (SELECT ROUND(
+    CASE WHEN COUNT(CASE WHEN pr.email_verified = TRUE THEN 1 END) > 0
+         THEN COUNT(DISTINCT CASE WHEN ff.first_deposit_ts IS NOT NULL THEN ff.player_id END)::numeric / 
+              COUNT(CASE WHEN pr.email_verified = TRUE THEN 1 END) * 100 
+         ELSE 0 END, 2)
+   FROM player_reg pr
+   LEFT JOIN ftd_first ff ON pr.player_id = ff.player_id
+   WHERE pr.registration_ts >= (SELECT start_date FROM bounds)
+     AND pr.registration_ts < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+  ) AS "%Conversion complete reg",
+  
+  -- Unique depositors for entire period
+  (SELECT COUNT(DISTINCT t.player_id)
+   FROM transactions t
+   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+   JOIN players ON players.id = t.player_id
+   JOIN companies ON companies.id = players.company_id
+   WHERE t.transaction_category='deposit'
+     AND t.transaction_type='credit'
+     AND t.status='completed'
+     AND t.balance_type='withdrawable'
+     AND t.created_at >= (SELECT start_date FROM bounds)
+     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+     [[ AND UPPER(COALESCE(
+            t.metadata->>'currency',
+            t.cash_currency,
+            players.wallet_currency,
+            companies.currency
+          )) IN ({{currency_filter}}) ]]
+  ) AS "Unique Depositors",
+  
+  SUM("#Deposits") AS "#Deposits",
+  ROUND(SUM("Deposits Amount"), 2) AS "Deposits Amount",
+  SUM("#Withdrawals") AS "#Withdrawals",
+  ROUND(SUM("Withdrawals Amount"), 2) AS "Withdrawals Amount",
+  ROUND(SUM("Withdrawals Amount Canceled"), 2) AS "Withdrawals Amount Canceled",
+  ROUND(CASE WHEN SUM("Deposits Amount") > 0 
+             THEN SUM("Withdrawals Amount") / SUM("Deposits Amount") * 100 ELSE 0 END, 2) AS "%Withdrawals/Deposits",
+  ROUND(SUM("CashFlow"), 2) AS "CashFlow",
+  
+  -- Active players for entire period  
+  (SELECT COUNT(DISTINCT t.player_id)
+   FROM transactions t
+   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+   JOIN players ON players.id = t.player_id
+   JOIN companies ON companies.id = players.company_id
+   WHERE t.transaction_category='game_bet'
+     AND t.created_at >= (SELECT start_date FROM bounds)
+     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+     [[ AND UPPER(COALESCE(
+            t.metadata->>'currency',
+            t.cash_currency,
+            players.wallet_currency,
+            companies.currency
+          )) IN ({{currency_filter}}) ]]
+  ) AS "Active Players",
+  
+  -- Real active players for entire period
+  (SELECT COUNT(DISTINCT t.player_id)
+   FROM transactions t
+   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+   JOIN players ON players.id = t.player_id
+   JOIN companies ON companies.id = players.company_id
+   WHERE t.transaction_category='game_bet'
+     AND t.balance_type='withdrawable'
+     AND t.created_at >= (SELECT start_date FROM bounds)
+     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+     [[ AND UPPER(COALESCE(
+            t.metadata->>'currency',
+            t.cash_currency,
+            players.wallet_currency,
+            companies.currency
+          )) IN ({{currency_filter}}) ]]
+  ) AS "Real Active Players",
+  
+  ROUND(SUM("Cash Bet"), 2) AS "Cash Bet",
+  ROUND(SUM("Cash Win"), 2) AS "Cash Win",
+  ROUND(SUM("Promo bet"), 2) AS "Promo bet",
+  ROUND(SUM("Promo Win"), 2) AS "Promo Win",
+  ROUND(SUM("Turnover"), 2) AS "Turnover",
+  ROUND(SUM("Turnover Casino"), 2) AS "Turnover Casino",
+  ROUND(SUM("GGR"), 2) AS "GGR",
+  ROUND(SUM("GGR Casino"), 2) AS "GGR Casino",
+  ROUND(SUM("Cash GGR"), 2) AS "Cash GGR",
+  ROUND(SUM("Cash GGR Casino"), 2) AS "Cash GGR Casino",
+  ROUND(SUM("Bonus Converted (Gross)"), 2) AS "Bonus Converted (Gross)",
+  ROUND(SUM("Bonus Cost"), 2) AS "Bonus Cost",
+  ROUND(CASE WHEN SUM("GGR") > 0 
+             THEN SUM("Bonus Cost") / SUM("GGR") * 100 ELSE 0 END, 2) AS "Bonus Ratio (GGR)",
+  ROUND(CASE WHEN SUM("Deposits Amount") > 0 
+             THEN SUM("Bonus Cost") / SUM("Deposits Amount") * 100 ELSE 0 END, 2) AS "Bonus Ratio (Deposits)",
+  ROUND(CASE WHEN SUM("Turnover") > 0 
+             THEN (SUM("Cash Win") + SUM("Promo Win")) / SUM("Turnover") * 100 ELSE 0 END, 2) AS "Payout %",
+  ROUND(CASE WHEN SUM("GGR") > 0 
+             THEN SUM("CashFlow") / SUM("GGR") * 100 ELSE 0 END, 2) AS "%CashFlow to GGR"
+FROM daily_data
+
+UNION ALL
+
+SELECT * FROM daily_data
+
+ORDER BY sort_order, "Date" DESC;
+----------------------------------------
+
+/* =========================
+   MONTHLY KPIs — MULTI-MONTH VIEW with COMPLETE SUMMARY ROW
+   [NEW] Implements standardized EUR currency conversion with NULL safety
+   ========================= */
+
+WITH
+/* --- Optional inputs & Date Bounds --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+bounds_raw AS (
+  SELECT 
+    COALESCE((SELECT MAX(end_date) FROM end_input), CURRENT_DATE) AS end_date_raw,
+    (SELECT MAX(start_date) FROM start_input) AS start_date_raw
+),
+bounds AS (
+  SELECT 
+    DATE_TRUNC('month', end_date_raw) + INTERVAL '1 month' - INTERVAL '1 day' AS end_date,
+    CASE 
+      WHEN start_date_raw IS NULL THEN DATE_TRUNC('month', end_date_raw - INTERVAL '12 months')
+      WHEN start_date_raw > end_date_raw THEN DATE_TRUNC('month', end_date_raw)
+      ELSE DATE_TRUNC('month', start_date_raw)
+    END AS start_date
+  FROM bounds_raw
+),
+month_series AS (
+  SELECT 
+    DATE_TRUNC('month', d)::date AS report_month,
+    DATE_TRUNC('month', d) AS start_ts,
+    LEAST(DATE_TRUNC('month', d) + INTERVAL '1 month', NOW()) AS end_ts
+  FROM generate_series(
+    (SELECT start_date FROM bounds),
+    (SELECT end_date FROM bounds),
+    INTERVAL '1 month'
+  ) AS d
+),
+
+/* ---------- FILTERED PLAYERS ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]
+    [[ AND players.country = CASE {{country}}
+      WHEN 'Romania' THEN 'RO'
+      WHEN 'France' THEN 'FR'
+      WHEN 'Germany' THEN 'DE'
+      WHEN 'Cyprus' THEN 'CY'
+      WHEN 'Poland' THEN 'PL'
+      WHEN 'Spain' THEN 'ES'
+      WHEN 'Italy' THEN 'IT'
+      WHEN 'Canada' THEN 'CA'
+      WHEN 'Australia' THEN 'AU'
+      WHEN 'United Kingdom' THEN 'GB'
+      WHEN 'Finland' THEN 'FI'
+      WHEN 'Albania' THEN 'AL'
+      WHEN 'Austria' THEN 'AT'
+      WHEN 'Belgium' THEN 'BE'
+      WHEN 'Brazil' THEN 'BR'
+      WHEN 'Bulgaria' THEN 'BG'
+      WHEN 'Georgia' THEN 'GE'
+      WHEN 'Greece' THEN 'GR'
+      WHEN 'Hungary' THEN 'HU'
+      WHEN 'India' THEN 'IN'
+      WHEN 'Netherlands' THEN 'NL'
+      WHEN 'Portugal' THEN 'PT'
+      WHEN 'Singapore' THEN 'SG'
+      WHEN 'Turkey' THEN 'TR'
+      WHEN 'United Arab Emirates' THEN 'AE'
+      WHEN 'Afghanistan' THEN 'AF'
+      WHEN 'Armenia' THEN 'AM'
+      WHEN 'Denmark' THEN 'DK'
+      WHEN 'Algeria' THEN 'DZ'
+      WHEN 'Andorra' THEN 'AD'
+    END ]]
+    [[ AND CASE
+      WHEN {{traffic_source}} = 'Organic' THEN players.affiliate_id IS NULL
+      WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+      ELSE TRUE
+    END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+    [[ AND {{is_test_account}} ]]
+),
+
+/* ---------- FTD METRICS ---------- */
+ftd_first AS (
+  SELECT
+    t.player_id,
+    MIN(t.created_at) AS first_deposit_ts
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+player_reg AS (
+  SELECT
+    p.id AS player_id,
+    p.created_at AS registration_ts,
+    p.email_verified,
+    c.name AS brand_name
+  FROM players p
+  INNER JOIN filtered_players fp ON p.id = fp.player_id
+  LEFT JOIN companies c ON p.company_id = c.id
+),
+
+registrations AS (
+  SELECT
+    ms.report_month,
+    COUNT(pr.*) AS total_registrations,
+    COUNT(CASE WHEN pr.email_verified = TRUE THEN 1 END) AS complete_registrations
+  FROM month_series ms
+  LEFT JOIN player_reg pr
+    ON pr.registration_ts >= ms.start_ts
+    AND pr.registration_ts < ms.end_ts
+  GROUP BY ms.report_month
+),
+
+ftds AS (
+  SELECT
+    DATE_TRUNC('month', ff.first_deposit_ts)::date AS report_month,
+    pr.player_id,
+    pr.registration_ts,
+    ff.first_deposit_ts
+  FROM ftd_first ff
+  JOIN player_reg pr ON pr.player_id = ff.player_id
+),
+
+ftd_metrics AS (
+  SELECT
+    ms.report_month,
+    COUNT(DISTINCT f.player_id) AS ftds_count,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('month', f.registration_ts) = DATE_TRUNC('month', f.first_deposit_ts)) AS new_ftds,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('month', f.registration_ts) < DATE_TRUNC('month', f.first_deposit_ts)) AS old_ftds,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('day', f.registration_ts) = DATE_TRUNC('day', f.first_deposit_ts)) AS d0_ftds,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('day', f.registration_ts) <> DATE_TRUNC('day', f.first_deposit_ts)) AS late_ftds
+  FROM month_series ms
+  LEFT JOIN ftds f ON f.report_month = ms.report_month
+  GROUP BY ms.report_month
+),
+
+/* ---------- DEPOSIT METRICS ---------- */
+deposit_metrics AS (
+  SELECT
+    ms.report_month,
+    COUNT(DISTINCT t.player_id) FILTER (
+      WHERE t.transaction_category='deposit'
+        AND t.transaction_type='credit'
+        AND t.status='completed'
+        AND t.balance_type='withdrawable'
+    ) AS unique_depositors,
+    COUNT(*) FILTER (
+      WHERE t.transaction_category='deposit'
+        AND t.transaction_type='credit'
+        AND t.status='completed'
+        AND t.balance_type='withdrawable'
+    ) AS deposits_count,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_category='deposit'
+       AND t.transaction_type='credit'
+       AND t.status='completed'
+       AND t.balance_type='withdrawable'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS deposits_amount
+  FROM month_series ms
+  LEFT JOIN transactions t
+    ON t.created_at >= ms.start_ts
+    AND t.created_at < ms.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ms.report_month
+),
+
+/* ---------- WITHDRAWAL METRICS ---------- */
+withdrawal_metrics AS (
+  SELECT
+    ms.report_month,
+    COUNT(t.id) FILTER (
+      WHERE t.transaction_category='withdrawal'
+        AND t.transaction_type='debit'
+        AND t.balance_type='withdrawable'
+        AND t.status='completed'
+    ) AS withdrawals_count,
+    COALESCE(SUM(ABS(
+      CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    )) FILTER (
+      WHERE t.transaction_category='withdrawal'
+        AND t.transaction_type='debit'
+        AND t.balance_type='withdrawable'
+        AND t.status='completed'
+    ), 0) AS withdrawals_amount,
+    COALESCE(SUM(ABS(
+      CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    )) FILTER (
+      WHERE t.transaction_category='withdrawal'
+        AND t.transaction_type='debit'
+        AND t.balance_type='withdrawable'
+        AND t.status='cancelled'
+    ), 0) AS withdrawals_cancelled
+  FROM month_series ms
+  LEFT JOIN transactions t
+    ON t.created_at >= ms.start_ts
+    AND t.created_at < ms.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ms.report_month
+),
+
+/* ---------- ACTIVE PLAYERS ---------- */
+active_players AS (
+  SELECT
+    ms.report_month,
+    COUNT(DISTINCT CASE 
+      WHEN t.transaction_category='game_bet' 
+      THEN t.player_id 
+    END) AS active_players_count,
+    COUNT(DISTINCT CASE 
+      WHEN t.transaction_category='game_bet' 
+       AND t.balance_type='withdrawable' 
+      THEN t.player_id 
+    END) AS real_active_players
+  FROM month_series ms
+  LEFT JOIN transactions t
+    ON t.created_at >= ms.start_ts
+    AND t.created_at < ms.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ms.report_month
+),
+
+/* ---------- BETTING METRICS ---------- */
+betting_metrics AS (
+  SELECT
+    ms.report_month,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='debit'
+       AND t.transaction_category='game_bet'
+       AND t.balance_type='withdrawable'
+       AND t.status='completed'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS cash_bet,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='credit'
+       AND t.transaction_category='game_bet'
+       AND t.balance_type='withdrawable'
+       AND t.status='completed'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS cash_win,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='debit'
+       AND t.transaction_category='bonus'
+       AND t.balance_type='non-withdrawable'
+       AND t.status='completed'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS promo_bet,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='credit'
+       AND t.status='completed'
+       AND t.balance_type='non-withdrawable'
+       AND t.transaction_category = 'bonus'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS promo_win
+  FROM month_series ms
+  LEFT JOIN transactions t
+    ON t.created_at >= ms.start_ts
+    AND t.created_at < ms.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ms.report_month
+),
+
+/* ---------- BONUS METRICS ---------- */
+bonus_converted AS (
+  SELECT
+    ms.report_month,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='credit'
+       AND t.transaction_category='bonus_completion'
+       AND t.status='completed'
+       AND t.balance_type='withdrawable'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS bonus_converted_amount
+  FROM month_series ms
+  LEFT JOIN transactions t
+    ON t.created_at >= ms.start_ts
+    AND t.created_at < ms.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ms.report_month
+),
+
+bonus_cost AS (
+  SELECT
+    ms.report_month,
+    COALESCE(SUM(CASE
+      WHEN t.transaction_type='credit'
+       AND t.transaction_category='bonus_completion'
+       AND t.status='completed'
+       AND t.balance_type='withdrawable'
+      THEN CASE 
+        WHEN {{currency_filter}} = 'EUR' 
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount 
+      END
+    END), 0) AS total_bonus_cost
+  FROM month_series ms
+  LEFT JOIN transactions t
+    ON t.created_at >= ms.start_ts
+    AND t.created_at < ms.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(
+      t.metadata->>'currency',
+      t.cash_currency,
+      players.wallet_currency,
+      companies.currency
+    )) IN ({{currency_filter}}) ]]
+  GROUP BY ms.report_month
+),
+
+/* ---------- PREPARE MONTHLY DATA ---------- */
+monthly_data AS (
+  SELECT 
+    0 as sort_order,
+    TO_CHAR(ms.report_month, 'YYYY-MM') AS "Month",
+    COALESCE(r.total_registrations, 0) AS "#Registrations",
+    COALESCE(fm.ftds_count, 0) AS "#FTDs",
+    COALESCE(fm.new_ftds, 0) AS "#New FTDs",
+    ROUND(CASE WHEN COALESCE(fm.ftds_count,0) > 0 
+               THEN fm.new_ftds::numeric / fm.ftds_count * 100 ELSE 0 END, 2) AS "%New FTDs",
+    COALESCE(fm.old_ftds, 0) AS "#Old FTDs",
+    ROUND(CASE WHEN COALESCE(fm.ftds_count,0) > 0 
+               THEN fm.old_ftds::numeric / fm.ftds_count * 100 ELSE 0 END, 2) AS "% Old FTDs",
+    COALESCE(fm.d0_ftds, 0) AS "#D0 FTDs",
+    ROUND(CASE WHEN COALESCE(fm.ftds_count,0) > 0 
+               THEN fm.d0_ftds::numeric / fm.ftds_count * 100 ELSE 0 END, 2) AS "%D0 FTDs",
+    COALESCE(fm.late_ftds, 0) AS "#Late FTDs",
+    ROUND(CASE WHEN COALESCE(r.total_registrations,0) > 0 
+               THEN COALESCE(fm.ftds_count,0)::numeric / r.total_registrations * 100 ELSE 0 END, 2) AS "%Conversion total reg",
+    ROUND(CASE WHEN COALESCE(r.complete_registrations,0) > 0 
+               THEN COALESCE(fm.ftds_count,0)::numeric / r.complete_registrations * 100 ELSE 0 END, 2) AS "%Conversion complete reg",
+    COALESCE(dm.unique_depositors, 0) AS "Unique Depositors",
+    COALESCE(dm.deposits_count, 0) AS "#Deposits",
+    ROUND(COALESCE(dm.deposits_amount, 0), 2) AS "Deposits Amount",
+    COALESCE(wm.withdrawals_count, 0) AS "#Withdrawals",
+    ROUND(COALESCE(wm.withdrawals_amount, 0), 2) AS "Withdrawals Amount",
+    ROUND(COALESCE(wm.withdrawals_cancelled, 0), 2) AS "Withdrawals Amount Canceled",
+    ROUND(CASE WHEN COALESCE(dm.deposits_amount,0) > 0 
+               THEN COALESCE(wm.withdrawals_amount,0) / dm.deposits_amount * 100 ELSE 0 END, 2) AS "%Withdrawals/Deposits",
+    ROUND(COALESCE(dm.deposits_amount,0) - COALESCE(wm.withdrawals_amount, 0), 2) AS "CashFlow",
+    COALESCE(ap.active_players_count, 0) AS "Active Players",
+    COALESCE(ap.real_active_players, 0) AS "Real Active Players",
+    ROUND(COALESCE(bet.cash_bet, 0), 2) AS "Cash Bet",
+    ROUND(COALESCE(bet.cash_win, 0), 2) AS "Cash Win",
+    ROUND(COALESCE(bet.promo_bet, 0), 2) AS "Promo bet",
+    ROUND(COALESCE(bet.promo_win, 0), 2) AS "Promo Win",
+    ROUND(COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0), 2) AS "Turnover",
+    ROUND(COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0), 2) AS "Turnover Casino",
+    ROUND(COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0) - COALESCE(bet.cash_win,0) - COALESCE(bet.promo_win,0), 2) AS "GGR",
+    ROUND(COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0) - COALESCE(bet.cash_win,0) - COALESCE(bet.promo_win,0), 2) AS "GGR Casino",
+    ROUND(COALESCE(bet.cash_bet,0) - COALESCE(bet.cash_win,0), 2) AS "Cash GGR",
+    ROUND(COALESCE(bet.cash_bet,0) - COALESCE(bet.cash_win,0), 2) AS "Cash GGR Casino",
+    ROUND(COALESCE(bc.bonus_converted_amount, 0), 2) AS "Bonus Converted (Gross)",
+    ROUND(COALESCE(bcost.total_bonus_cost, 0), 2) AS "Bonus Cost",
+    ROUND(CASE 
+        WHEN (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0) - COALESCE(bet.cash_win,0) - COALESCE(bet.promo_win,0)) > 0 
+        THEN COALESCE(bcost.total_bonus_cost,0) / 
+             (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0) - COALESCE(bet.cash_win,0) - COALESCE(bet.promo_win,0)) * 100 
+        ELSE 0 END, 2) AS "Bonus Ratio (GGR)",
+    ROUND(CASE WHEN COALESCE(dm.deposits_amount,0) > 0 
+               THEN COALESCE(bcost.total_bonus_cost,0) / dm.deposits_amount * 100 ELSE 0 END, 2) AS "Bonus Ratio (Deposits)",
+    ROUND(CASE 
+        WHEN (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)) > 0 
+        THEN (COALESCE(bet.cash_win,0) + COALESCE(bet.promo_win,0)) / 
+             (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)) * 100 
+        ELSE 0 END, 2) AS "Payout %",
+    ROUND(CASE 
+        WHEN (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0) - COALESCE(bet.cash_win,0) - COALESCE(bet.promo_win,0)) > 0 
+        THEN (COALESCE(dm.deposits_amount,0) - COALESCE(wm.withdrawals_amount,0)) / 
+             (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0) - COALESCE(bet.cash_win,0) - COALESCE(bet.promo_win,0)) * 100 
+        ELSE 0 END, 2) AS "%CashFlow to GGR"
+  FROM month_series ms
+  LEFT JOIN registrations r ON r.report_month = ms.report_month
+  LEFT JOIN ftd_metrics fm ON fm.report_month = ms.report_month
+  LEFT JOIN deposit_metrics dm ON dm.report_month = ms.report_month
+  LEFT JOIN withdrawal_metrics wm ON wm.report_month = ms.report_month
+  LEFT JOIN active_players ap ON ap.report_month = ms.report_month
+  LEFT JOIN betting_metrics bet ON bet.report_month = ms.report_month
+  LEFT JOIN bonus_converted bc ON bc.report_month = ms.report_month
+  LEFT JOIN bonus_cost bcost ON bcost.report_month = ms.report_month
+)
+
+/* ========== FINAL OUTPUT WITH COMPLETE SUMMARY ROW ========== */
+SELECT 
+  -1 as sort_order, 
+  'TOTAL' AS "Month", 
+  SUM("#Registrations") AS "#Registrations", 
+  SUM("#FTDs") AS "#FTDs", 
+  SUM("#New FTDs") AS "#New FTDs", 
+  ROUND(CASE WHEN SUM("#FTDs") > 0 
+             THEN SUM("#New FTDs")::numeric / SUM("#FTDs") * 100 ELSE 0 END, 2) AS "%New FTDs", 
+  SUM("#Old FTDs") AS "#Old FTDs", 
+  ROUND(CASE WHEN SUM("#FTDs") > 0 
+             THEN SUM("#Old FTDs")::numeric / SUM("#FTDs") * 100 ELSE 0 END, 2) AS "% Old FTDs", 
+  SUM("#D0 FTDs") AS "#D0 FTDs", 
+  ROUND(CASE WHEN SUM("#FTDs") > 0 
+             THEN SUM("#D0 FTDs")::numeric / SUM("#FTDs") * 100 ELSE 0 END, 2) AS "%D0 FTDs", 
+  SUM("#Late FTDs") AS "#Late FTDs", 
+  ROUND(CASE WHEN SUM("#Registrations") > 0 
+             THEN SUM("#FTDs")::numeric / SUM("#Registrations") * 100 ELSE 0 END, 2) AS "%Conversion total reg", 
+  
+  -- Complete registration conversion for entire period
+  (SELECT ROUND(
+    CASE WHEN COUNT(CASE WHEN pr.email_verified = TRUE THEN 1 END) > 0 
+         THEN COUNT(DISTINCT CASE WHEN ff.first_deposit_ts IS NOT NULL THEN ff.player_id END)::numeric / 
+              COUNT(CASE WHEN pr.email_verified = TRUE THEN 1 END) * 100 
+         ELSE 0 END, 2) 
+   FROM player_reg pr 
+   LEFT JOIN ftd_first ff ON pr.player_id = ff.player_id 
+   WHERE pr.registration_ts >= (SELECT start_date FROM bounds) 
+     AND pr.registration_ts < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+  ) AS "%Conversion complete reg", 
+  
+  -- Unique depositors for entire period
+  (SELECT COUNT(DISTINCT t.player_id) 
+   FROM transactions t 
+   INNER JOIN filtered_players fp ON t.player_id = fp.player_id 
+   JOIN players ON players.id = t.player_id 
+   JOIN companies ON companies.id = players.company_id 
+   WHERE t.transaction_category='deposit' 
+     AND t.transaction_type='credit' 
+     AND t.status='completed' 
+     AND t.balance_type='withdrawable' 
+     AND t.created_at >= (SELECT start_date FROM bounds) 
+     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day' 
+     [[ AND UPPER(COALESCE(
+            t.metadata->>'currency',
+            t.cash_currency,
+            players.wallet_currency,
+            companies.currency
+          )) IN ({{currency_filter}}) ]]
+  ) AS "Unique Depositors", 
+  
+  SUM("#Deposits") AS "#Deposits", 
+  ROUND(SUM("Deposits Amount"), 2) AS "Deposits Amount", 
+  SUM("#Withdrawals") AS "#Withdrawals", 
+  ROUND(SUM("Withdrawals Amount"), 2) AS "Withdrawals Amount", 
+  ROUND(SUM("Withdrawals Amount Canceled"), 2) AS "Withdrawals Amount Canceled", 
+  ROUND(CASE WHEN SUM("Deposits Amount") > 0 
+             THEN SUM("Withdrawals Amount") / SUM("Deposits Amount") * 100 ELSE 0 END, 2) AS "%Withdrawals/Deposits", 
+  ROUND(SUM("CashFlow"), 2) AS "CashFlow", 
+  
+  -- Active players for entire period
+  (SELECT COUNT(DISTINCT t.player_id) 
+   FROM transactions t 
+   INNER JOIN filtered_players fp ON t.player_id = fp.player_id 
+   JOIN players ON players.id = t.player_id 
+   JOIN companies ON companies.id = players.company_id 
+   WHERE t.transaction_category='game_bet' 
+     AND t.created_at >= (SELECT start_date FROM bounds) 
+     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day' 
+     [[ AND UPPER(COALESCE(
+            t.metadata->>'currency',
+            t.cash_currency,
+            players.wallet_currency,
+            companies.currency
+          )) IN ({{currency_filter}}) ]]
+  ) AS "Active Players", 
+  
+  -- Real active players for entire period
+  (SELECT COUNT(DISTINCT t.player_id) 
+   FROM transactions t 
+   INNER JOIN filtered_players fp ON t.player_id = fp.player_id 
+   JOIN players ON players.id = t.player_id 
+   JOIN companies ON companies.id = players.company_id 
+   WHERE t.transaction_category='game_bet' 
+     AND t.balance_type='withdrawable' 
+     AND t.created_at >= (SELECT start_date FROM bounds) 
+     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day' 
+     [[ AND UPPER(COALESCE(
+            t.metadata->>'currency',
+            t.cash_currency,
+            players.wallet_currency,
+            companies.currency
+          )) IN ({{currency_filter}}) ]]
+  ) AS "Real Active Players", 
+  
+  ROUND(SUM("Cash Bet"), 2) AS "Cash Bet", 
+  ROUND(SUM("Cash Win"), 2) AS "Cash Win", 
+  ROUND(SUM("Promo bet"), 2) AS "Promo bet", 
+  ROUND(SUM("Promo Win"), 2) AS "Promo Win", 
+  ROUND(SUM("Turnover"), 2) AS "Turnover", 
+  ROUND(SUM("Turnover Casino"), 2) AS "Turnover Casino", 
+  ROUND(SUM("GGR"), 2) AS "GGR", 
+  ROUND(SUM("GGR Casino"), 2) AS "GGR Casino", 
+  ROUND(SUM("Cash GGR"), 2) AS "Cash GGR", 
+  ROUND(SUM("Cash GGR Casino"), 2) AS "Cash GGR Casino", 
+  ROUND(SUM("Bonus Converted (Gross)"), 2) AS "Bonus Converted (Gross)", 
+  ROUND(SUM("Bonus Cost"), 2) AS "Bonus Cost", 
+  ROUND(CASE WHEN SUM("GGR") > 0 
+             THEN SUM("Bonus Cost") / SUM("GGR") * 100 ELSE 0 END, 2) AS "Bonus Ratio (GGR)", 
+  ROUND(CASE WHEN SUM("Deposits Amount") > 0 
+             THEN SUM("Bonus Cost") / SUM("Deposits Amount") * 100 ELSE 0 END, 2) AS "Bonus Ratio (Deposits)", 
+  ROUND(CASE WHEN SUM("Turnover") > 0 
+             THEN (SUM("Cash Win") + SUM("Promo Win")) / SUM("Turnover") * 100 ELSE 0 END, 2) AS "Payout %", 
+  ROUND(CASE WHEN SUM("GGR") > 0 
+             THEN SUM("CashFlow") / SUM("GGR") * 100 ELSE 0 END, 2) AS "%CashFlow to GGR"
+FROM monthly_data
+
+UNION ALL
+
+SELECT * FROM monthly_data
+
+ORDER BY sort_order, "Month" DESC;
+
+--------------
+
+-- =====================================================
+-- BONUS REPORT DASHBOARD - CORRECTED v3.1
+-- FIXED: Duplicate rows removed + company filter removed
+-- 25 filters working correctly
+-- =====================================================
+
+WITH pb_scope AS (
+    SELECT DISTINCT ON (
+      player_bonuses.id,
+      bonuses.id,
+      players.id,
+      companies.id
+    )
+      player_bonuses.id AS player_bonus_id,
+      player_bonuses.bonus_id AS bonus_id,
+      player_bonuses.player_id AS player_id,
+      player_bonuses.bonus_amount AS bonus_amount,
+      COALESCE(player_bonuses.free_spins_count, 0) AS free_spins_granted,
+      player_bonuses.activated_at AS activated_at,
+      player_bonuses.status AS lifecycle_status,
+      player_bonuses.trigger_transaction_id AS trigger_transaction_id,
+      player_bonuses.wagering_multiplier AS wager_factor,
+      player_bonuses.wagering_condition AS wagering_condition,
+      bonuses.title AS campaign_name,
+      bonuses.bonus_type AS campaign_category,
+      bonuses.bonus_code,
+      (bonuses.terms -> 'trigger' ->> 'type') AS bonus_trigger,
+      (bonuses.terms -> 'expiry' ->> 'value') AS wager_time_value,
+      (bonuses.terms -> 'expiry' ->> 'unit') AS wager_time_unit,
+      (bonuses.terms -> 'unlock_expiration' ->> 'value') AS bonus_availability_value,
+      (bonuses.terms -> 'unlock_expiration' ->> 'unit') AS bonus_availability_unit,
+      (bonuses.terms -> 'reward' ->> 'max_reward') AS max_bonus_reward,
+      (bonuses.terms -> 'wagering' ->> 'max_release') AS max_bonus_release,
+      (bonuses.terms -> 'reward' ->> 'percentage_amount') AS percentage_amount,
+      (bonuses.terms -> 'reward' ->> 'min_deposit') AS minimum_deposit,
+      (bonuses.terms -> 'wagering' ->> 'max_bet') AS max_bet,
+      bonuses.free_spins AS fs_wagering_factor,
+      brands.name AS brand_name,
+      companies.name AS company_name,
+      players.country AS player_country,
+      players.is_test_account,
+      players.affiliate_id,
+      COALESCE(pa.metadata::jsonb->>'affiliate_name', 'UNASSIGNED') AS affiliate_name,
+      COALESCE(promotions.template_code, 'UNASSIGNED') AS template_code,
+      CONCAT(players.os, ' / ', players.browser) AS registration_launcher,
+      CASE 
+        WHEN players.affiliate_id IS NOT NULL THEN 'AFFILIATE'
+        ELSE 'ORGANIC'
+      END AS traffic_source
+    FROM
+      player_bonuses
+      JOIN bonuses ON bonuses.id = player_bonuses.bonus_id
+      LEFT JOIN brands ON brands.id = player_bonuses.brand_id
+      JOIN players ON players.id = player_bonuses.player_id
+      JOIN companies ON companies.id = players.company_id
+      LEFT JOIN player_affiliates pa ON pa.player_id = players.id
+      LEFT JOIN promotion_bonuses ON promotion_bonuses.bonus_id = bonuses.id
+      LEFT JOIN promotions ON promotions.id = promotion_bonuses.promotion_id
+    WHERE
+      1 = 1	
+
+      -- Campaign filters (18)
+      [[AND {{brand_filter}}]] 
+      [[AND {{campaign_name_filter}}]] 
+      [[AND {{promotion_name_filter}}]]
+      [[AND {{template_code_filter}}]]
+      [[AND {{player_filter}}]]
+      [[AND {{campaign_category_filter}}]]
+      [[AND {{bonus_trigger_filter}}]]
+      [[AND {{lifecycle_filter}}]]
+      [[AND {{wager_factor_filter}}]]
+      [[AND {{wagering_condition_filter}}]]
+      [[AND {{wager_time_filter}}]]
+      [[AND {{bonus_availability_filter}}]]
+      [[AND {{max_bonus_reward_filter}}]]
+      [[AND {{max_bonus_release_filter}}]]
+      [[AND {{percentage_amount_filter}}]]
+      [[AND {{minimum_deposit_filter}}]]
+      [[AND {{max_bet_filter}}]]
+      [[AND {{fs_wagering_factor_filter}}]]
+      
+      -- Organizational filters (4)
+      [[AND {{traffic_source_filter}}]]
+      [[AND {{date_range_filter}}]]
+      
+      -- Player attribute filters (3)
+      [[AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher_filter}}]]
+      [[ AND players.country = CASE {{country}}
+        WHEN 'Romania' THEN 'RO'
+        WHEN 'France' THEN 'FR'
+        WHEN 'Germany' THEN 'DE'
+        WHEN 'Cyprus' THEN 'CY'
+        WHEN 'Poland' THEN 'PL'
+        WHEN 'Spain' THEN 'ES'
+        WHEN 'Italy' THEN 'IT'
+        WHEN 'Canada' THEN 'CA'
+        WHEN 'Australia' THEN 'AU'
+        WHEN 'United Kingdom' THEN 'GB'
+        WHEN 'Finland' THEN 'FI'
+        WHEN 'Albania' THEN 'AL'
+        WHEN 'Austria' THEN 'AT'
+        WHEN 'Belgium' THEN 'BE'
+        WHEN 'Brazil' THEN 'BR'
+        WHEN 'Bulgaria' THEN 'BG'
+        WHEN 'Georgia' THEN 'GE'
+        WHEN 'Greece' THEN 'GR'
+        WHEN 'Hungary' THEN 'HU'
+        WHEN 'India' THEN 'IN'
+        WHEN 'Netherlands' THEN 'NL'
+        WHEN 'Portugal' THEN 'PT'
+        WHEN 'Singapore' THEN 'SG'
+        WHEN 'Turkey' THEN 'TR'
+        WHEN 'United Arab Emirates' THEN 'AE'
+        WHEN 'Afghanistan' THEN 'AF'
+        WHEN 'Armenia' THEN 'AM'
+        WHEN 'Denmark' THEN 'DK'
+        WHEN 'Algeria' THEN 'DZ'
+        WHEN 'Andorra' THEN 'AD'
+      END ]]
+      
+      -- Affiliate filters (2)
+      [[ AND {{affiliate_id}} ]]
+      [[ AND {{affiliate_name}} ]]
+      
+      -- Test account filter
+      [[ AND {{is_test_account}} ]]
+    
+    ORDER BY player_bonuses.id, bonuses.id, players.id, companies.id
+  ),
+  
+  tx_scope_bonus AS (
+    SELECT
+      transactions.*,
+      pb_scope.player_bonus_id,
+      pb_scope.bonus_id AS pb_bonus_id,
+      pb_scope.free_spins_granted
+    FROM
+      pb_scope
+      JOIN transactions ON transactions.player_bonus_id = pb_scope.player_bonus_id
+    WHERE
+      1 = 1
+  ),
+  
+  dep_tx_scope AS (
+    SELECT
+      transactions.*,
+      pb_scope.player_bonus_id,
+      pb_scope.bonus_id AS pb_bonus_id
+    FROM
+      pb_scope
+      JOIN transactions ON transactions.id = pb_scope.trigger_transaction_id
+    WHERE
+      1 = 1
+  ),
+  
+  -- DEPOSITS
+  dep AS (
+    SELECT
+      dep_tx_scope.pb_bonus_id AS bonus_id,
+      SUM(
+        CASE
+          WHEN dep_tx_scope.transaction_category = 'deposit'
+          AND dep_tx_scope.transaction_type = 'credit'
+          AND dep_tx_scope.status = 'completed' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(dep_tx_scope.eur_amount, dep_tx_scope.amount)
+            ELSE dep_tx_scope.amount 
+          END
+          ELSE 0
+        END
+      ) AS deposit_amount
+    FROM dep_tx_scope
+    GROUP BY dep_tx_scope.pb_bonus_id
+  ),
+  
+  -- GRANTED CASH (from BO_DEPOSIT)
+  granted_cash AS (
+    SELECT
+      tx_scope_bonus.pb_bonus_id AS bonus_id,
+      SUM(
+        CASE
+          WHEN tx_scope_bonus.transaction_category = 'BO_DEPOSIT'
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.status = 'completed'
+          AND tx_scope_bonus.balance_type = 'withdrawable' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount 
+          END
+          ELSE 0
+        END
+      ) AS granted_cash_amount
+    FROM tx_scope_bonus
+    GROUP BY tx_scope_bonus.pb_bonus_id
+  ),
+  
+  -- GRANTED BONUS
+  granted_bonus AS (
+    SELECT
+      tx_scope_bonus.pb_bonus_id AS bonus_id,
+      SUM(
+        CASE
+          WHEN tx_scope_bonus.transaction_category = 'bonus'
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.status = 'completed'
+          AND tx_scope_bonus.balance_type = 'non-withdrawable' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount 
+          END
+          
+          WHEN tx_scope_bonus.transaction_category = 'free_spin_bonus'
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.status = 'completed'
+          AND tx_scope_bonus.balance_type = 'non-withdrawable' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount 
+          END
+          
+          WHEN tx_scope_bonus.transaction_category IN ('free_bet', 'free_bet_win', 'freebet_win')
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.status = 'completed'
+          AND tx_scope_bonus.balance_type = 'non-withdrawable' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount 
+          END
+          
+          WHEN tx_scope_bonus.transaction_category = 'bonus_completion'
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.status = 'completed'
+          AND tx_scope_bonus.balance_type = 'non-withdrawable' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount 
+          END
+          
+          ELSE 0
+        END
+      ) AS granted_bonus_amount
+    FROM tx_scope_bonus
+    GROUP BY tx_scope_bonus.pb_bonus_id
+  ),
+  
+  -- BONUS CONVERTED TO CASH
+  bonus_converted AS (
+    SELECT
+      tx_scope_bonus.pb_bonus_id AS bonus_id,
+      SUM(
+        CASE
+          WHEN tx_scope_bonus.transaction_category = 'bonus_completion'
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.status = 'completed'
+          AND tx_scope_bonus.balance_type = 'withdrawable' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount 
+          END
+          ELSE 0
+        END
+      ) AS bonus_converted_cash,
+      COUNT(
+        DISTINCT CASE
+          WHEN tx_scope_bonus.transaction_category = 'bonus_completion'
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.status = 'completed'
+          AND tx_scope_bonus.balance_type = 'withdrawable' THEN tx_scope_bonus.player_id
+        END
+      ) AS converted_players
+    FROM tx_scope_bonus
+    GROUP BY tx_scope_bonus.pb_bonus_id
+  ),
+  
+  -- BONUS REVOKED
+  bonus_revoked AS (
+    SELECT
+      bonus_id,
+      COUNT(CASE WHEN lifecycle_status = 'cancelled' THEN 1 END) AS revoked_count,
+      SUM(CASE WHEN lifecycle_status = 'cancelled' THEN bonus_amount ELSE 0 END) AS revoked_amount
+    FROM pb_scope
+    GROUP BY bonus_id
+  ),
+  
+  -- FREE SPIN WINS
+  free_spin_wins AS (
+    SELECT
+      tx_scope_bonus.pb_bonus_id AS bonus_id,
+      SUM(
+        CASE
+          WHEN tx_scope_bonus.transaction_category = 'free_spin_bonus'
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.balance_type = 'non-withdrawable'
+          AND tx_scope_bonus.status = 'completed' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount 
+          END
+          ELSE 0
+        END
+      ) AS free_spin_win_bonus,
+      SUM(
+        CASE
+          WHEN tx_scope_bonus.transaction_category = 'free_spin_bonus'
+          AND tx_scope_bonus.transaction_type = 'credit'
+          AND tx_scope_bonus.balance_type = 'withdrawable'
+          AND tx_scope_bonus.status = 'completed' 
+          THEN CASE 
+            WHEN {{currency_filter}} = 'EUR' 
+            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount 
+          END
+          ELSE 0
+        END
+      ) AS free_spin_win_cash
+    FROM tx_scope_bonus
+    GROUP BY tx_scope_bonus.pb_bonus_id
+  ),
+  
+  -- BONUS COST
+  bonus_cost AS (
+    SELECT
+      tx_scope_bonus.pb_bonus_id AS bonus_id,
+      (
+        SUM(
+          CASE
+            WHEN tx_scope_bonus.transaction_category = 'bonus'
+            AND tx_scope_bonus.transaction_type = 'credit'
+            AND tx_scope_bonus.status = 'completed'
+            AND tx_scope_bonus.balance_type = 'withdrawable' 
+            THEN CASE 
+              WHEN {{currency_filter}} = 'EUR' 
+              THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+              ELSE tx_scope_bonus.amount 
+            END
+            ELSE 0
+          END
+        ) +
+        SUM(
+          CASE
+            WHEN tx_scope_bonus.transaction_category = 'bonus_completion'
+            AND tx_scope_bonus.transaction_type = 'credit'
+            AND tx_scope_bonus.status = 'completed'
+            AND tx_scope_bonus.balance_type = 'withdrawable' 
+            THEN CASE 
+              WHEN {{currency_filter}} = 'EUR' 
+              THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+              ELSE tx_scope_bonus.amount 
+            END
+            ELSE 0
+          END
+        ) +
+        SUM(
+          CASE
+            WHEN tx_scope_bonus.transaction_category IN ('free_bet_win', 'free_bet', 'freebet_win')
+            AND tx_scope_bonus.transaction_type = 'credit'
+            AND tx_scope_bonus.status = 'completed' 
+            THEN CASE 
+              WHEN {{currency_filter}} = 'EUR' 
+              THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+              ELSE tx_scope_bonus.amount 
+            END
+            ELSE 0
+          END
+        ) +
+        SUM(
+          CASE
+            WHEN tx_scope_bonus.transaction_category = 'BO_DEPOSIT'
+            AND tx_scope_bonus.transaction_type = 'credit'
+            AND tx_scope_bonus.status = 'completed'
+            AND tx_scope_bonus.balance_type = 'withdrawable' 
+            THEN CASE 
+              WHEN {{currency_filter}} = 'EUR' 
+              THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+              ELSE tx_scope_bonus.amount 
+            END
+            ELSE 0
+          END
+        )
+      ) AS bonus_cost
+    FROM tx_scope_bonus
+    GROUP BY tx_scope_bonus.pb_bonus_id
+  ),
+  
+  -- AGGREGATED METRICS
+  agg AS (
+    SELECT
+      pb_scope.bonus_id,
+      MIN(pb_scope.campaign_name) AS campaign_name,
+      MIN(pb_scope.campaign_category) AS campaign_category,
+      COUNT(DISTINCT pb_scope.player_id) AS granted_players,
+      SUM(pb_scope.bonus_amount) AS bonus_amount_granted,
+      SUM(pb_scope.free_spins_granted) AS free_spins_granted,
+      COALESCE(dep.deposit_amount, 0) AS deposit_amount,
+      COALESCE(granted_cash.granted_cash_amount, 0) AS granted_cash,
+      COALESCE(granted_bonus.granted_bonus_amount, 0) AS granted_bonus,
+      COALESCE(bonus_revoked.revoked_amount, 0) AS bonus_revoked,
+      COALESCE(bonus_converted.bonus_converted_cash, 0) AS bonus_converted_to_cash,
+      COALESCE(bonus_converted.converted_players, 0) AS converted_players,
+      COALESCE(free_spin_wins.free_spin_win_bonus, 0) AS free_spin_win_bonus,
+      COALESCE(free_spin_wins.free_spin_win_cash, 0) AS free_spin_win_cash,
+      COALESCE(bonus_cost.bonus_cost, 0) AS bonus_cost
+    FROM
+      pb_scope
+      LEFT JOIN dep ON dep.bonus_id = pb_scope.bonus_id
+      LEFT JOIN granted_cash ON granted_cash.bonus_id = pb_scope.bonus_id
+      LEFT JOIN granted_bonus ON granted_bonus.bonus_id = pb_scope.bonus_id
+      LEFT JOIN bonus_revoked ON bonus_revoked.bonus_id = pb_scope.bonus_id
+      LEFT JOIN bonus_converted ON bonus_converted.bonus_id = pb_scope.bonus_id
+      LEFT JOIN free_spin_wins ON free_spin_wins.bonus_id = pb_scope.bonus_id
+      LEFT JOIN bonus_cost ON bonus_cost.bonus_id = pb_scope.bonus_id
+    GROUP BY
+      pb_scope.bonus_id,
+      dep.deposit_amount,
+      granted_cash.granted_cash_amount,
+      granted_bonus.granted_bonus_amount,
+      bonus_revoked.revoked_amount,
+      bonus_converted.bonus_converted_cash,
+      bonus_converted.converted_players,
+      free_spin_wins.free_spin_win_bonus,
+      free_spin_wins.free_spin_win_cash,
+      bonus_cost.bonus_cost
+  ),
+  
+  -- Detail Rows
+  detail_rows AS (
+    SELECT
+      agg.campaign_name AS "CAMPAIGN NAME",
+      agg.granted_players AS "BONUS GRANTED PLAYERS",
+      ROUND(agg.bonus_cost, 2) AS "BONUS COST",
+      ROUND(agg.deposit_amount, 2) AS "DEPOSIT AMOUNT",
+      ROUND(
+        CASE 
+          WHEN agg.bonus_cost > 0 THEN ((agg.deposit_amount - agg.bonus_cost) / agg.bonus_cost) * 100
+          ELSE NULL
+        END, 1
+      ) AS "ROI%",
+      ROUND(agg.bonus_cost / NULLIF(agg.granted_players, 0), 2) AS "BONUS COST / PLAYER",
+      ROUND(agg.deposit_amount / NULLIF(agg.granted_players, 0), 2) AS "DEPOSIT AMOUNT / PLAYER",
+      ROUND(agg.granted_cash, 2) AS "GRANTED CASH",
+      ROUND(agg.granted_bonus, 2) AS "GRANTED BONUS",
+      ROUND(agg.bonus_revoked, 2) AS "BONUS REVOKED",
+      ROUND(agg.bonus_converted_to_cash, 2) AS "BONUS CONVERTED (GROSS)",
+      ROUND((agg.converted_players::numeric / NULLIF(agg.granted_players, 0)) * 100, 1) AS "% CONVERTED PLAYERS",
+      ROUND(agg.granted_bonus / NULLIF(agg.granted_players, 0), 2) AS "GRANTED BONUS / PLAYER",
+      ROUND(agg.bonus_converted_to_cash / NULLIF(agg.granted_players, 0), 2) AS "BONUS CONVERTED / PLAYER",
+      agg.free_spins_granted AS "GRANTED FREESPINS",
+      ROUND(agg.free_spin_win_bonus, 2) AS "FREESPINS WIN (BONUS)",
+      ROUND(agg.free_spin_win_cash, 2) AS "FREESPINS WIN (CASH)",
+      'N/A - No game_round data' AS "% FREESPINS PLAYED",
+      agg.campaign_category::text AS "CAMPAIGN CATEGORY",
+      1 AS sort_order
+    FROM agg
+    WHERE agg.granted_players > 0
+  ),
+  
+  -- Totals Row
+  totals_row AS (
+    SELECT
+      'TOTAL'::text AS "CAMPAIGN NAME",
+      SUM(CAST(agg.granted_players AS NUMERIC))::INTEGER AS "BONUS GRANTED PLAYERS",
+      ROUND(SUM(agg.bonus_cost), 2) AS "BONUS COST",
+      ROUND(SUM(agg.deposit_amount), 2) AS "DEPOSIT AMOUNT",
+      ROUND(
+        CASE 
+          WHEN SUM(agg.bonus_cost) > 0 THEN ((SUM(agg.deposit_amount) - SUM(agg.bonus_cost)) / SUM(agg.bonus_cost)) * 100
+          ELSE NULL
+        END, 1
+      ) AS "ROI%",
+      ROUND(SUM(agg.bonus_cost) / NULLIF(SUM(agg.granted_players), 0), 2) AS "BONUS COST / PLAYER",
+      ROUND(SUM(agg.deposit_amount) / NULLIF(SUM(agg.granted_players), 0), 2) AS "DEPOSIT AMOUNT / PLAYER",
+      ROUND(SUM(agg.granted_cash), 2) AS "GRANTED CASH",
+      ROUND(SUM(agg.granted_bonus), 2) AS "GRANTED BONUS",
+      ROUND(SUM(agg.bonus_revoked), 2) AS "BONUS REVOKED",
+      ROUND(SUM(agg.bonus_converted_to_cash), 2) AS "BONUS CONVERTED (GROSS)",
+      ROUND((SUM(agg.converted_players)::numeric / NULLIF(SUM(agg.granted_players), 0)) * 100, 1) AS "% CONVERTED PLAYERS",
+      ROUND(SUM(agg.granted_bonus) / NULLIF(SUM(agg.granted_players), 0), 2) AS "GRANTED BONUS / PLAYER",
+      ROUND(SUM(agg.bonus_converted_to_cash) / NULLIF(SUM(agg.granted_players), 0), 2) AS "BONUS CONVERTED / PLAYER",
+      SUM(agg.free_spins_granted)::INTEGER AS "GRANTED FREESPINS",
+      ROUND(SUM(agg.free_spin_win_bonus), 2) AS "FREESPINS WIN (BONUS)",
+      ROUND(SUM(agg.free_spin_win_cash), 2) AS "FREESPINS WIN (CASH)",
+      'N/A - No game_round data' AS "% FREESPINS PLAYED",
+      'TOTAL'::text AS "CAMPAIGN CATEGORY",
+      0 AS sort_order
+    FROM agg
+  ),
+  
+  -- Combined Results
+  combined_results AS (
+    SELECT * FROM totals_row
+    UNION ALL
+    SELECT * FROM detail_rows
+  )
+
+SELECT
+  "CAMPAIGN NAME",
+  "BONUS GRANTED PLAYERS",
+  "BONUS COST",
+  "DEPOSIT AMOUNT",
+  "ROI%",
+  "BONUS COST / PLAYER",
+  "DEPOSIT AMOUNT / PLAYER",
+  "GRANTED CASH",
+  "GRANTED BONUS",
+  "BONUS REVOKED",
+  "BONUS CONVERTED (GROSS)",
+  "% CONVERTED PLAYERS",
+  "GRANTED BONUS / PLAYER",
+  "BONUS CONVERTED / PLAYER",
+  "GRANTED FREESPINS",
+  "FREESPINS WIN (BONUS)",
+  "FREESPINS WIN (CASH)",
+  "% FREESPINS PLAYED",
+  "CAMPAIGN CATEGORY"
+FROM combined_results
+ORDER BY sort_order ASC, "BONUS COST" DESC NULLS LAST;
+
+--------------------------------
+
+/* ============================================
+   DEPOSITORS COHORT - ALIGNED WITH DAILY/MONTHLY FILTERS
+   Shows retention of depositors over time
+   ============================================ */
+
+WITH
+/* --- Optional date inputs for cohort window --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize cohort window (default: last 12 months through TODAY) --- */
+bounds AS (
+  SELECT
+    COALESCE((SELECT start_date FROM start_input), 
+             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '12 months')) AS start_date,
+    COALESCE((SELECT end_date FROM end_input), CURRENT_DATE) AS end_date
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Identify first deposits with currency filter */
+first_deposits AS (
+  SELECT 
+    t.player_id,
+    DATE_TRUNC('month', MIN(t.created_at)) as first_deposit_month,
+    MIN(t.created_at) as first_deposit_date
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' 
+    AND t.transaction_type = 'credit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    -- Apply cohort date bounds
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    -- Currency filter using same resolution as daily/monthly
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/* Step 2: Calculate cohort sizes */
+cohort_sizes AS (
+  SELECT 
+    first_deposit_month as cohort_month,
+    COUNT(DISTINCT player_id) as cohort_size
+  FROM first_deposits
+  GROUP BY first_deposit_month
+),
+
+/* Step 3: Track deposit activity for each cohort */
+cohort_activity AS (
+  SELECT 
+    fd.first_deposit_month as cohort_month,
+    DATE_TRUNC('month', t.created_at) as activity_month,
+    COUNT(DISTINCT t.player_id) as active_depositors
+  FROM first_deposits fd
+  INNER JOIN transactions t ON fd.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' 
+    AND t.transaction_type = 'credit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= fd.first_deposit_date
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY fd.first_deposit_month, DATE_TRUNC('month', t.created_at)
+),
+
+/* Step 4: Calculate retention */
+cohort_retention AS (
+  SELECT 
+    ca.cohort_month,
+    ca.activity_month,
+    ca.active_depositors,
+    cs.cohort_size,
+    EXTRACT(YEAR FROM AGE(ca.activity_month, ca.cohort_month)) * 12 + 
+    EXTRACT(MONTH FROM AGE(ca.activity_month, ca.cohort_month)) as months_since_first_deposit
+  FROM cohort_activity ca
+  INNER JOIN cohort_sizes cs ON ca.cohort_month = cs.cohort_month
+  WHERE EXTRACT(YEAR FROM AGE(ca.activity_month, ca.cohort_month)) * 12 + 
+        EXTRACT(MONTH FROM AGE(ca.activity_month, ca.cohort_month)) <= 12
+)
+
+/* Step 5: Pivot for final output */
+SELECT 
+  TO_CHAR(cohort_month, 'Month YYYY') as "FIRST DEPOSIT MONTH",
+  MAX(CASE WHEN months_since_first_deposit = 0 THEN active_depositors END) as "Month 0",
+  MAX(CASE WHEN months_since_first_deposit = 1 THEN active_depositors END) as "Month 1",
+  MAX(CASE WHEN months_since_first_deposit = 2 THEN active_depositors END) as "Month 2",
+  MAX(CASE WHEN months_since_first_deposit = 3 THEN active_depositors END) as "Month 3",
+  MAX(CASE WHEN months_since_first_deposit = 4 THEN active_depositors END) as "Month 4",
+  MAX(CASE WHEN months_since_first_deposit = 5 THEN active_depositors END) as "Month 5",
+  MAX(CASE WHEN months_since_first_deposit = 6 THEN active_depositors END) as "Month 6",
+  MAX(CASE WHEN months_since_first_deposit = 7 THEN active_depositors END) as "Month 7",
+  MAX(CASE WHEN months_since_first_deposit = 8 THEN active_depositors END) as "Month 8",
+  MAX(CASE WHEN months_since_first_deposit = 9 THEN active_depositors END) as "Month 9",
+  MAX(CASE WHEN months_since_first_deposit = 10 THEN active_depositors END) as "Month 10",
+  MAX(CASE WHEN months_since_first_deposit = 11 THEN active_depositors END) as "Month 11",
+  MAX(CASE WHEN months_since_first_deposit = 12 THEN active_depositors END) as "Month 12"
+FROM cohort_retention
+GROUP BY cohort_month
+ORDER BY cohort_month;
+
+-------
+/* ============================================
+   DEPOSITORS COHORT (%) - FINAL CORRECTED SQL
+   Shows retention percentages as numbers (Metabase will format as %)
+   ============================================ */
+
+WITH
+/* --- Optional date inputs for cohort window --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize cohort window (default: last 12 months through TODAY) --- */
+bounds AS (
+  SELECT
+    COALESCE((SELECT start_date FROM start_input), 
+             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '12 months')) AS start_date,
+    -- [FIXED] Changed DATE_TRUNC to CURRENT_DATE to match your sample's logic, including data up to the present day.
+    COALESCE((SELECT end_date FROM end_input), CURRENT_DATE) AS end_date
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+END ]]
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Identify first deposits with currency filter */
+first_deposits AS (
+  SELECT 
+    t.player_id,
+    DATE_TRUNC('month', MIN(t.created_at)) as first_deposit_month,
+    MIN(t.created_at) as first_deposit_date
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' 
+    AND t.transaction_type = 'credit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/* Step 2: Calculate cohort sizes */
+cohort_sizes AS (
+  SELECT 
+    first_deposit_month as cohort_month,
+    COUNT(DISTINCT player_id) as cohort_size
+  FROM first_deposits
+  GROUP BY first_deposit_month
+),
+
+/* Step 3: Track deposit activity for each cohort */
+cohort_activity AS (
+  SELECT 
+    fd.first_deposit_month as cohort_month,
+    DATE_TRUNC('month', t.created_at) as activity_month,
+    COUNT(DISTINCT t.player_id) as active_depositors
+  FROM first_deposits fd
+  INNER JOIN transactions t ON fd.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' 
+    AND t.transaction_type = 'credit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= fd.first_deposit_date
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY fd.first_deposit_month, DATE_TRUNC('month', t.created_at)
+),
+
+/* Step 4: Calculate retention */
+cohort_retention AS (
+  SELECT 
+    ca.cohort_month,
+    ca.activity_month,
+    ca.active_depositors,
+    cs.cohort_size,
+    EXTRACT(YEAR FROM AGE(ca.activity_month, ca.cohort_month)) * 12 + 
+    EXTRACT(MONTH FROM AGE(ca.activity_month, ca.cohort_month)) as months_since_first_deposit
+  FROM cohort_activity ca
+  INNER JOIN cohort_sizes cs ON ca.cohort_month = cs.cohort_month
+  WHERE EXTRACT(YEAR FROM AGE(ca.activity_month, ca.cohort_month)) * 12 + 
+        EXTRACT(MONTH FROM AGE(ca.activity_month, ca.cohort_month)) <= 12
+)
+
+/* Step 5: Pivot showing NUMERIC PERCENTAGES (no % symbol) */
+SELECT 
+  TO_CHAR(cohort_month, 'Month YYYY') as "FIRST DEPOSIT MONTH",
+  100::numeric as "Month 0",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 1 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 1",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 2 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 2",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 3 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 3",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 4 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 4",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 5 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 5",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 6 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 6",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 7 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 7",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 8 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 8",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 9 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 9",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 10 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 10",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 11 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 11",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 12 THEN active_depositors::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 12"
+FROM cohort_retention
+GROUP BY cohort_month, cohort_size
+ORDER BY cohort_month;
+
+---------------
+
+/* ============================================
+   DEPOSIT AMOUNTS COHORT - ALIGNED WITH DAILY/MONTHLY FILTERS
+   Shows total deposit amounts by cohort over time
+   ============================================ */
+
+WITH
+/* --- Optional date inputs for cohort window --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize cohort window (default: last 12 months through TODAY) --- */
+bounds AS (
+  SELECT
+    COALESCE((SELECT start_date FROM start_input), 
+             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '12 months')) AS start_date,
+    COALESCE((SELECT end_date FROM end_input), CURRENT_DATE) AS end_date
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Identify first deposits with currency filter */
+first_deposits AS (
+  SELECT 
+    t.player_id,
+    DATE_TRUNC('month', MIN(t.created_at)) as first_deposit_month,
+    MIN(t.created_at) as first_deposit_date
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' 
+    AND t.transaction_type = 'credit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    -- Apply cohort date bounds
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    -- Currency filter using same resolution as daily/monthly
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/* Step 2: Calculate cohort sizes (for reference) */
+cohort_sizes AS (
+  SELECT 
+    first_deposit_month as cohort_month,
+    COUNT(DISTINCT player_id) as cohort_size
+  FROM first_deposits
+  GROUP BY first_deposit_month
+),
+
+/* Step 3: Calculate TOTAL DEPOSIT AMOUNTS for each cohort across months */
+cohort_deposit_amounts AS (
+  SELECT 
+    fd.first_deposit_month as cohort_month,
+    DATE_TRUNC('month', t.created_at) as activity_month,
+    SUM(CASE 
+      WHEN {{currency_filter}} = 'EUR' 
+      THEN COALESCE(t.eur_amount, t.amount)
+      ELSE t.amount 
+    END) as total_deposit_amount,
+    COUNT(t.id) as total_deposits,
+    COUNT(DISTINCT t.player_id) as unique_depositors
+  FROM first_deposits fd
+  INNER JOIN transactions t ON fd.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' 
+    AND t.transaction_type = 'credit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= fd.first_deposit_date
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY fd.first_deposit_month, DATE_TRUNC('month', t.created_at)
+),
+
+/* Step 4: Calculate months since first deposit */
+cohort_retention AS (
+  SELECT 
+    cda.cohort_month,
+    cda.activity_month,
+    cda.total_deposit_amount,
+    cda.total_deposits,
+    cda.unique_depositors,
+    cs.cohort_size,
+    EXTRACT(YEAR FROM AGE(cda.activity_month, cda.cohort_month)) * 12 + 
+    EXTRACT(MONTH FROM AGE(cda.activity_month, cda.cohort_month)) as months_since_first_deposit
+  FROM cohort_deposit_amounts cda
+  INNER JOIN cohort_sizes cs ON cda.cohort_month = cs.cohort_month
+  WHERE EXTRACT(YEAR FROM AGE(cda.activity_month, cda.cohort_month)) * 12 + 
+        EXTRACT(MONTH FROM AGE(cda.activity_month, cda.cohort_month)) <= 12
+)
+
+/* Step 5: Pivot showing NUMERIC AMOUNTS ONLY */
+SELECT 
+  TO_CHAR(cohort_month, 'Month YYYY') as "FIRST DEPOSIT MONTH",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 0 THEN total_deposit_amount END), 2) as "Month 0",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 1 THEN total_deposit_amount END), 2) as "Month 1",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 2 THEN total_deposit_amount END), 2) as "Month 2",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 3 THEN total_deposit_amount END), 2) as "Month 3",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 4 THEN total_deposit_amount END), 2) as "Month 4",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 5 THEN total_deposit_amount END), 2) as "Month 5",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 6 THEN total_deposit_amount END), 2) as "Month 6",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 7 THEN total_deposit_amount END), 2) as "Month 7",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 8 THEN total_deposit_amount END), 2) as "Month 8",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 9 THEN total_deposit_amount END), 2) as "Month 9",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 10 THEN total_deposit_amount END), 2) as "Month 10",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 11 THEN total_deposit_amount END), 2) as "Month 11",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 12 THEN total_deposit_amount END), 2) as "Month 12"
+FROM cohort_retention
+GROUP BY cohort_month
+ORDER BY cohort_month;
+
+----------------------
+/* ============================================
+   DEPOSIT AMOUNTS COHORT (%) - FINAL CORRECTED SQL
+   Shows deposit amounts as percentage of Month 0 (as numbers)
+   ============================================ */
+
+WITH
+/* --- Optional date inputs for cohort window --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize cohort window (default: last 12 months through TODAY) --- */
+bounds AS (
+  SELECT
+    COALESCE((SELECT start_date FROM start_input), 
+             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '12 months')) AS start_date,
+    -- [FIXED] Aligned with your corrected sample to include data up to the present day.
+    COALESCE((SELECT end_date FROM end_input), CURRENT_DATE) AS end_date
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+END ]]
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Identify first deposits with currency filter */
+first_deposits AS (
+  SELECT 
+    t.player_id,
+    DATE_TRUNC('month', MIN(t.created_at)) as first_deposit_month,
+    MIN(t.created_at) as first_deposit_date
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' 
+    AND t.transaction_type = 'credit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/* Step 2: Calculate TOTAL DEPOSIT AMOUNTS for each cohort across months */
+cohort_deposit_amounts AS (
+  SELECT 
+    fd.first_deposit_month as cohort_month,
+    DATE_TRUNC('month', t.created_at) as activity_month,
+    -- [FIXED] Implemented bulletproof currency logic
+    SUM(CASE 
+      WHEN {{currency_filter}} = 'EUR' 
+      THEN COALESCE(t.eur_amount, t.amount)
+      ELSE t.amount 
+    END) as total_deposit_amount,
+    EXTRACT(YEAR FROM AGE(DATE_TRUNC('month', t.created_at), fd.first_deposit_month)) * 12 + 
+    EXTRACT(MONTH FROM AGE(DATE_TRUNC('month', t.created_at), fd.first_deposit_month)) as months_since_first_deposit
+  FROM first_deposits fd
+  INNER JOIN transactions t ON fd.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' 
+    AND t.transaction_type = 'credit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= fd.first_deposit_date
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY fd.first_deposit_month, DATE_TRUNC('month', t.created_at)
+),
+
+/* Step 3: Get Month 0 amounts for baseline */
+month_0_amounts AS (
+  SELECT 
+    cohort_month,
+    total_deposit_amount as month_0_amount
+  FROM cohort_deposit_amounts
+  WHERE months_since_first_deposit = 0
+)
+
+/* Step 4: Pivot showing NUMERIC PERCENTAGES (no % symbol) */
+SELECT 
+  TO_CHAR(cda.cohort_month, 'Month YYYY') as "FIRST DEPOSIT MONTH",
+  100::numeric as "Month 0",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 1 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 1",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 2 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 2",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 3 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 3",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 4 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 4",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 5 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 5",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 6 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 6",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 7 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 7",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 8 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 8",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 9 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 9",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 10 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 10",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 11 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 11",
+  ROUND(MAX(CASE WHEN months_since_first_deposit = 12 THEN total_deposit_amount / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 12"
+FROM cohort_deposit_amounts cda
+JOIN month_0_amounts m0 ON cda.cohort_month = m0.cohort_month
+WHERE months_since_first_deposit <= 12
+GROUP BY cda.cohort_month
+ORDER BY cda.cohort_month;
+
+--------------
+
+/* ============================================
+   CASH PLAYERS COHORT - ALIGNED WITH DAILY/MONTHLY FILTERS
+   Shows retention of players making cash bets over time
+   ============================================ */
+
+WITH
+/* --- Optional date inputs for cohort window --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize cohort window (default: last 12 months through TODAY) --- */
+bounds AS (
+  SELECT
+    COALESCE((SELECT start_date FROM start_input), 
+             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '12 months')) AS start_date,
+    COALESCE((SELECT end_date FROM end_input), CURRENT_DATE) AS end_date
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Identify first cash bets with currency filter */
+first_cash_bets AS (
+  SELECT 
+    t.player_id,
+    DATE_TRUNC('month', MIN(t.created_at)) as first_cash_bet_month,
+    MIN(t.created_at) as first_cash_bet_date
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'game_bet' 
+    AND t.transaction_type = 'debit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    -- Apply cohort date bounds
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    -- Currency filter using same resolution as daily/monthly
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/* Step 2: Calculate cohort sizes */
+cohort_sizes AS (
+  SELECT 
+    first_cash_bet_month as cohort_month,
+    COUNT(DISTINCT player_id) as cohort_size
+  FROM first_cash_bets
+  GROUP BY first_cash_bet_month
+),
+
+/* Step 3: Track activity for each cohort */
+cohort_activity AS (
+  SELECT 
+    fcb.first_cash_bet_month as cohort_month,
+    DATE_TRUNC('month', t.created_at) as activity_month,
+    COUNT(DISTINCT t.player_id) as active_players
+  FROM first_cash_bets fcb
+  INNER JOIN transactions t ON fcb.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'game_bet' 
+    AND t.transaction_type = 'debit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= fcb.first_cash_bet_date
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY fcb.first_cash_bet_month, DATE_TRUNC('month', t.created_at)
+),
+
+/* Step 4: Calculate retention */
+cohort_retention AS (
+  SELECT 
+    ca.cohort_month,
+    ca.activity_month,
+    ca.active_players,
+    cs.cohort_size,
+    EXTRACT(YEAR FROM AGE(ca.activity_month, ca.cohort_month)) * 12 + 
+    EXTRACT(MONTH FROM AGE(ca.activity_month, ca.cohort_month)) as months_since_first_bet
+  FROM cohort_activity ca
+  INNER JOIN cohort_sizes cs ON ca.cohort_month = cs.cohort_month
+  WHERE EXTRACT(YEAR FROM AGE(ca.activity_month, ca.cohort_month)) * 12 + 
+        EXTRACT(MONTH FROM AGE(ca.activity_month, ca.cohort_month)) <= 12
+)
+
+/* Step 5: Pivot for final output */
+SELECT 
+  TO_CHAR(cohort_month, 'Month YYYY') as "FIRST CASH BET MONTH",
+  MAX(CASE WHEN months_since_first_bet = 0 THEN active_players END) as "Month 0",
+  MAX(CASE WHEN months_since_first_bet = 1 THEN active_players END) as "Month 1",
+  MAX(CASE WHEN months_since_first_bet = 2 THEN active_players END) as "Month 2",
+  MAX(CASE WHEN months_since_first_bet = 3 THEN active_players END) as "Month 3",
+  MAX(CASE WHEN months_since_first_bet = 4 THEN active_players END) as "Month 4",
+  MAX(CASE WHEN months_since_first_bet = 5 THEN active_players END) as "Month 5",
+  MAX(CASE WHEN months_since_first_bet = 6 THEN active_players END) as "Month 6",
+  MAX(CASE WHEN months_since_first_bet = 7 THEN active_players END) as "Month 7",
+  MAX(CASE WHEN months_since_first_bet = 8 THEN active_players END) as "Month 8",
+  MAX(CASE WHEN months_since_first_bet = 9 THEN active_players END) as "Month 9",
+  MAX(CASE WHEN months_since_first_bet = 10 THEN active_players END) as "Month 10",
+  MAX(CASE WHEN months_since_first_bet = 11 THEN active_players END) as "Month 11",
+  MAX(CASE WHEN months_since_first_bet = 12 THEN active_players END) as "Month 12"
+FROM cohort_retention
+GROUP BY cohort_month
+ORDER BY cohort_month;
+
+-------
+/* ============================================
+   CASH PLAYERS COHORT (%) - NUMERIC VERSION FOR CONDITIONAL FORMATTING
+   Shows retention percentages as numbers (Metabase will format as %)
+   ============================================ */
+
+WITH
+/* --- Optional date inputs for cohort window --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize cohort window (default: last 12 months through TODAY) --- */
+bounds AS (
+  SELECT
+    COALESCE((SELECT start_date FROM start_input), 
+             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '12 months')) AS start_date,
+    COALESCE((SELECT end_date FROM end_input), CURRENT_DATE) AS end_date
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Identify first cash bets with currency filter */
+first_cash_bets AS (
+  SELECT 
+    t.player_id,
+    DATE_TRUNC('month', MIN(t.created_at)) as first_cash_bet_month,
+    MIN(t.created_at) as first_cash_bet_date
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'game_bet' 
+    AND t.transaction_type = 'debit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    -- Apply cohort date bounds (FIXED: use CURRENT_DATE)
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    -- Currency filter using same resolution as daily/monthly
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/* Step 2: Calculate cohort sizes */
+cohort_sizes AS (
+  SELECT 
+    first_cash_bet_month as cohort_month,
+    COUNT(DISTINCT player_id) as cohort_size
+  FROM first_cash_bets
+  GROUP BY first_cash_bet_month
+),
+
+/* Step 3: Track activity for each cohort */
+cohort_activity AS (
+  SELECT 
+    fcb.first_cash_bet_month as cohort_month,
+    DATE_TRUNC('month', t.created_at) as activity_month,
+    COUNT(DISTINCT t.player_id) as active_players
+  FROM first_cash_bets fcb
+  INNER JOIN transactions t ON fcb.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'game_bet' 
+    AND t.transaction_type = 'debit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= fcb.first_cash_bet_date
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY fcb.first_cash_bet_month, DATE_TRUNC('month', t.created_at)
+),
+
+/* Step 4: Calculate retention */
+cohort_retention AS (
+  SELECT 
+    ca.cohort_month,
+    ca.activity_month,
+    ca.active_players,
+    cs.cohort_size,
+    EXTRACT(YEAR FROM AGE(ca.activity_month, ca.cohort_month)) * 12 + 
+    EXTRACT(MONTH FROM AGE(ca.activity_month, ca.cohort_month)) as months_since_first_bet
+  FROM cohort_activity ca
+  INNER JOIN cohort_sizes cs ON ca.cohort_month = cs.cohort_month
+  WHERE EXTRACT(YEAR FROM AGE(ca.activity_month, ca.cohort_month)) * 12 + 
+        EXTRACT(MONTH FROM AGE(ca.activity_month, ca.cohort_month)) <= 12
+)
+
+/* Step 5: Pivot showing NUMERIC PERCENTAGES (no % symbol for conditional formatting) */
+SELECT 
+  TO_CHAR(cohort_month, 'Month YYYY') as "FIRST CASH BET MONTH",
+  100::numeric as "Month 0",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 1 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 1",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 2 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 2",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 3 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 3",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 4 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 4",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 5 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 5",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 6 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 6",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 7 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 7",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 8 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 8",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 9 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 9",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 10 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 10",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 11 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 11",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 12 THEN active_players::numeric / NULLIF(cohort_size, 0) * 100 END), 1) as "Month 12"
+FROM cohort_retention
+GROUP BY cohort_month, cohort_size
+ORDER BY cohort_month;
+
+---------
+/* ============================================
+   CASH BET AMOUNTS COHORT - ALIGNED WITH DAILY/MONTHLY FILTERS
+   Shows total bet amounts by cohort over time
+   ============================================ */
+
+WITH
+/* --- Optional date inputs for cohort window --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize cohort window (default: last 12 months through TODAY) --- */
+bounds AS (
+  SELECT
+    COALESCE((SELECT start_date FROM start_input), 
+             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '12 months')) AS start_date,
+    COALESCE((SELECT end_date FROM end_input), CURRENT_DATE) AS end_date
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Identify first cash bets with currency filter */
+first_cash_bets AS (
+  SELECT 
+    t.player_id,
+    DATE_TRUNC('month', MIN(t.created_at)) as first_cash_bet_month,
+    MIN(t.created_at) as first_cash_bet_date
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'game_bet' 
+    AND t.transaction_type = 'debit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    -- Apply cohort date bounds
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    -- Currency filter using same resolution as daily/monthly
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/* Step 2: Calculate cohort sizes */
+cohort_sizes AS (
+  SELECT 
+    first_cash_bet_month as cohort_month,
+    COUNT(DISTINCT player_id) as cohort_size
+  FROM first_cash_bets
+  GROUP BY first_cash_bet_month
+),
+
+/* Step 3: Calculate TOTAL BET AMOUNTS for each cohort across months */
+cohort_bet_amounts AS (
+  SELECT 
+    fcb.first_cash_bet_month as cohort_month,
+    DATE_TRUNC('month', t.created_at) as activity_month,
+    SUM(ABS(CASE 
+      WHEN {{currency_filter}} = 'EUR' 
+      THEN COALESCE(t.eur_amount, t.amount)
+      ELSE t.amount 
+    END)) as total_amount_wagered,
+    COUNT(t.id) as total_bets,
+    COUNT(DISTINCT t.player_id) as active_players
+  FROM first_cash_bets fcb
+  INNER JOIN transactions t ON fcb.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'game_bet' 
+    AND t.transaction_type = 'debit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= fcb.first_cash_bet_date
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY fcb.first_cash_bet_month, DATE_TRUNC('month', t.created_at)
+),
+
+/* Step 4: Calculate months since first bet */
+cohort_retention AS (
+  SELECT 
+    cba.cohort_month,
+    cba.activity_month,
+    cba.total_amount_wagered,
+    cba.total_bets,
+    cba.active_players,
+    cs.cohort_size,
+    EXTRACT(YEAR FROM AGE(cba.activity_month, cba.cohort_month)) * 12 + 
+    EXTRACT(MONTH FROM AGE(cba.activity_month, cba.cohort_month)) as months_since_first_bet
+  FROM cohort_bet_amounts cba
+  INNER JOIN cohort_sizes cs ON cba.cohort_month = cs.cohort_month
+  WHERE EXTRACT(YEAR FROM AGE(cba.activity_month, cba.cohort_month)) * 12 + 
+        EXTRACT(MONTH FROM AGE(cba.activity_month, cba.cohort_month)) <= 12
+)
+
+/* Step 5: Pivot showing NUMERIC AMOUNTS ONLY */
+SELECT 
+  TO_CHAR(cohort_month, 'Month YYYY') as "FIRST CASH BET MONTH",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 0 THEN total_amount_wagered END), 2) as "Month 0",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 1 THEN total_amount_wagered END), 2) as "Month 1",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 2 THEN total_amount_wagered END), 2) as "Month 2",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 3 THEN total_amount_wagered END), 2) as "Month 3",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 4 THEN total_amount_wagered END), 2) as "Month 4",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 5 THEN total_amount_wagered END), 2) as "Month 5",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 6 THEN total_amount_wagered END), 2) as "Month 6",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 7 THEN total_amount_wagered END), 2) as "Month 7",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 8 THEN total_amount_wagered END), 2) as "Month 8",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 9 THEN total_amount_wagered END), 2) as "Month 9",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 10 THEN total_amount_wagered END), 2) as "Month 10",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 11 THEN total_amount_wagered END), 2) as "Month 11",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 12 THEN total_amount_wagered END), 2) as "Month 12"
+FROM cohort_retention
+GROUP BY cohort_month
+ORDER BY cohort_month;
+
+-----------
+
+/* ============================================
+   CASH BET AMOUNTS COHORT (%) - NUMERIC VERSION FOR CONDITIONAL FORMATTING
+   Shows bet amounts as percentage of Month 0 (as numbers)
+   ============================================ */
+
+WITH
+/* --- Optional date inputs for cohort window --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize cohort window (default: last 12 months through TODAY) --- */
+bounds AS (
+  SELECT
+    COALESCE((SELECT start_date FROM start_input), 
+             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '12 months')) AS start_date,
+    COALESCE((SELECT end_date FROM end_input), CURRENT_DATE) AS end_date
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Identify first cash bets with currency filter */
+first_cash_bets AS (
+  SELECT 
+    t.player_id,
+    DATE_TRUNC('month', MIN(t.created_at)) as first_cash_bet_month,
+    MIN(t.created_at) as first_cash_bet_date
+  FROM transactions t
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'game_bet' 
+    AND t.transaction_type = 'debit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    -- Apply cohort date bounds
+    AND t.created_at >= (SELECT start_date FROM bounds)
+    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    -- Currency filter using same resolution as daily/monthly
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/* Step 2: Calculate TOTAL BET AMOUNTS for each cohort across months */
+cohort_bet_amounts AS (
+  SELECT 
+    fcb.first_cash_bet_month as cohort_month,
+    DATE_TRUNC('month', t.created_at) as activity_month,
+    SUM(ABS(CASE 
+      WHEN {{currency_filter}} = 'EUR' 
+      THEN COALESCE(t.eur_amount, t.amount)
+      ELSE t.amount 
+    END)) as total_amount_wagered,
+    EXTRACT(YEAR FROM AGE(DATE_TRUNC('month', t.created_at), fcb.first_cash_bet_month)) * 12 + 
+    EXTRACT(MONTH FROM AGE(DATE_TRUNC('month', t.created_at), fcb.first_cash_bet_month)) as months_since_first_bet
+  FROM first_cash_bets fcb
+  INNER JOIN transactions t ON fcb.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'game_bet' 
+    AND t.transaction_type = 'debit' 
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND t.created_at >= fcb.first_cash_bet_date
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY fcb.first_cash_bet_month, DATE_TRUNC('month', t.created_at)
+),
+
+/* Step 3: Get Month 0 amounts for baseline */
+month_0_amounts AS (
+  SELECT 
+    cohort_month,
+    total_amount_wagered as month_0_amount
+  FROM cohort_bet_amounts
+  WHERE months_since_first_bet = 0
+)
+
+/* Step 4: Pivot showing NUMERIC PERCENTAGES (no % symbol) */
+SELECT 
+  TO_CHAR(cba.cohort_month, 'Month YYYY') as "FIRST CASH BET MONTH",
+  100::numeric as "Month 0",  -- Always 100 for Month 0
+  ROUND(MAX(CASE WHEN months_since_first_bet = 1 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 1",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 2 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 2",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 3 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 3",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 4 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 4",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 5 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 5",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 6 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 6",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 7 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 7",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 8 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 8",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 9 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 9",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 10 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 10",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 11 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 11",
+  ROUND(MAX(CASE WHEN months_since_first_bet = 12 THEN total_amount_wagered / NULLIF(m0.month_0_amount, 0) * 100 END), 1) as "Month 12"
+FROM cohort_bet_amounts cba
+JOIN month_0_amounts m0 ON cba.cohort_month = m0.cohort_month
+WHERE months_since_first_bet <= 12
+GROUP BY cba.cohort_month
+ORDER BY cba.cohort_month;
+
+
+-------------
+/* ============================================
+   NEW DEPOSITORS COHORT - DYNAMIC DATE RANGE
+   Shows unique count of new depositors by EXACT deposit frequency in their cohort month
+   One row per month within user-selected date range
+   New Depositor = first_ever_deposit in that specific month
+   
+   LOGIC: Count deposits WITHIN the cohort month only
+   - "1 time" = EXACTLY 1 deposit in that month
+   - "2 times" = EXACTLY 2 deposits in that month
+   - Each FTD appears in ONE column only
+   - Row total = unique FTD count
+   - Column totals = sum across all months
+   
+   FILTERS: Brand, Country, Traffic Source, Affiliate, Registration Launcher, Test Account, Currency
+   PARAMETERS: start_date, end_date (DATE), currency_filter, brand, country, traffic_source, affiliate_id, affiliate_name, registration_launcher, is_test_account
+   ============================================ */
+
+WITH
+
+/* --- Date range inputs (user-selectable) --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize analysis window (defaults to last 12 months if not specified) --- */
+analysis_period AS (
+  SELECT 
+    COALESCE(
+      (SELECT start_date FROM start_input),
+      (SELECT DATE_TRUNC('month', MAX(created_at) - INTERVAL '11 months')::date FROM transactions)
+    ) AS month_start,
+    COALESCE(
+      (SELECT end_date FROM end_input),
+      (SELECT DATE_TRUNC('month', MAX(created_at))::date FROM transactions)
+    ) AS month_end
+),
+
+/* --- Get all months in the analysis period --- */
+available_months AS (
+  SELECT DATE_TRUNC('month', d)::date AS month_start
+  FROM GENERATE_SERIES(
+    (SELECT month_start FROM analysis_period),
+    (SELECT month_end FROM analysis_period),
+    INTERVAL '1 month'
+  ) AS d
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+    END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Find first deposit date and identify FTD cohort month */
+player_first_deposit AS (
+  SELECT 
+    transactions.player_id,
+    MIN(transactions.created_at) as first_deposit_date,
+    DATE_TRUNC('month', MIN(transactions.created_at))::date AS cohort_month
+  FROM transactions
+  INNER JOIN filtered_players ON transactions.player_id = filtered_players.player_id
+  JOIN players ON players.id = transactions.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE transactions.transaction_category = 'deposit'
+    AND transactions.transaction_type = 'credit'
+    AND transactions.balance_type = 'withdrawable'
+    AND transactions.status = 'completed'
+    -- Currency filter using standard hierarchy
+    [[ AND UPPER(COALESCE(
+           transactions.metadata->>'currency',
+           transactions.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY transactions.player_id
+),
+
+/* Step 2: Count deposits WITHIN the cohort month for each FTD */
+ftd_deposit_counts AS (
+  SELECT 
+    pfd.cohort_month,
+    pfd.player_id,
+    COUNT(*) as deposits_in_cohort_month
+  FROM player_first_deposit pfd
+  INNER JOIN transactions t ON pfd.player_id = t.player_id
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND DATE_TRUNC('month', t.created_at)::date = pfd.cohort_month
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           (SELECT wallet_currency FROM players WHERE id = pfd.player_id),
+           (SELECT currency FROM companies WHERE id = (SELECT company_id FROM players WHERE id = pfd.player_id))
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY pfd.cohort_month, pfd.player_id
+),
+
+/* Step 3: Calculate EXACT bucket distribution for each month */
+monthly_bucket_counts AS (
+  SELECT
+    cohort_month,
+    COUNT(CASE WHEN deposits_in_cohort_month = 1 THEN 1 END) as bucket_1,
+    COUNT(CASE WHEN deposits_in_cohort_month = 2 THEN 1 END) as bucket_2,
+    COUNT(CASE WHEN deposits_in_cohort_month = 3 THEN 1 END) as bucket_3,
+    COUNT(CASE WHEN deposits_in_cohort_month = 4 THEN 1 END) as bucket_4,
+    COUNT(CASE WHEN deposits_in_cohort_month = 5 THEN 1 END) as bucket_5,
+    COUNT(CASE WHEN deposits_in_cohort_month = 6 THEN 1 END) as bucket_6,
+    COUNT(CASE WHEN deposits_in_cohort_month >= 7 THEN 1 END) as bucket_7_plus,
+    COUNT(*) as total_cohort
+  FROM ftd_deposit_counts
+  GROUP BY cohort_month
+),
+
+/* Step 4: Calculate column totals */
+column_totals AS (
+  SELECT
+    NULL::date as cohort_month,
+    SUM(bucket_1) as bucket_1,
+    SUM(bucket_2) as bucket_2,
+    SUM(bucket_3) as bucket_3,
+    SUM(bucket_4) as bucket_4,
+    SUM(bucket_5) as bucket_5,
+    SUM(bucket_6) as bucket_6,
+    SUM(bucket_7_plus) as bucket_7_plus,
+    SUM(total_cohort) as total_cohort
+  FROM monthly_bucket_counts
+),
+
+/* Step 5: Union monthly data with totals row */
+all_rows AS (
+  SELECT 
+    cohort_month,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_cohort,
+    0 as sort_order
+  FROM monthly_bucket_counts
+  
+  UNION ALL
+  
+  SELECT 
+    cohort_month,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_cohort,
+    1 as sort_order
+  FROM column_totals
+)
+
+/* Final Output - Monthly data with totals row */
+SELECT 
+  CASE 
+    WHEN cohort_month IS NULL THEN 'TOTALS'
+    ELSE TO_CHAR(cohort_month, 'FMMonth YYYY')
+  END as "Month",
+  bucket_1 as "1 time",
+  bucket_2 as "2 times",
+  bucket_3 as "3 times",
+  bucket_4 as "4 times",
+  bucket_5 as "5 times",
+  bucket_6 as "6 times",
+  bucket_7_plus as "7+ times",
+  total_cohort as "Total"
+FROM all_rows
+ORDER BY CASE WHEN sort_order = 1 THEN 1 ELSE 0 END DESC, 
+         cohort_month DESC;
+
+ -------------
+
+/* ============================================
+   NEW DEPOSITORS COHORT - PERCENTAGE DISTRIBUTION
+   Shows percentage of new depositors by EXACT deposit frequency in their cohort month
+   One row per month within user-selected date range
+   New Depositor = first_ever_deposit in that specific month
+   
+   LOGIC: Count deposits WITHIN the cohort month only
+   - "1 time" = EXACTLY 1 deposit in that month
+   - "2 times" = EXACTLY 2 deposits in that month
+   - Each FTD appears in ONE column only
+   - Row total = 100%
+   - Column totals = percentage distribution across all months
+   
+   FILTERS: Brand, Country, Traffic Source, Affiliate, Registration Launcher, Test Account, Currency
+   PARAMETERS: start_date, end_date (DATE), currency_filter, brand, country, traffic_source, affiliate_id, affiliate_name, registration_launcher, is_test_account
+   ============================================ */
+
+WITH
+
+/* --- Date range inputs (user-selectable) --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize analysis window (defaults to last 12 months if not specified) --- */
+analysis_period AS (
+  SELECT 
+    COALESCE(
+      (SELECT start_date FROM start_input),
+      (SELECT DATE_TRUNC('month', MAX(created_at) - INTERVAL '11 months')::date FROM transactions)
+    ) AS month_start,
+    COALESCE(
+      (SELECT end_date FROM end_input),
+      (SELECT DATE_TRUNC('month', MAX(created_at))::date FROM transactions)
+    ) AS month_end
+),
+
+/* --- Get all months in the analysis period --- */
+available_months AS (
+  SELECT DATE_TRUNC('month', d)::date AS month_start
+  FROM GENERATE_SERIES(
+    (SELECT month_start FROM analysis_period),
+    (SELECT month_end FROM analysis_period),
+    INTERVAL '1 month'
+  ) AS d
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+    END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 1: Find first deposit date and identify FTD cohort month */
+player_first_deposit AS (
+  SELECT 
+    transactions.player_id,
+    MIN(transactions.created_at) as first_deposit_date,
+    DATE_TRUNC('month', MIN(transactions.created_at))::date AS cohort_month
+  FROM transactions
+  INNER JOIN filtered_players ON transactions.player_id = filtered_players.player_id
+  JOIN players ON players.id = transactions.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE transactions.transaction_category = 'deposit'
+    AND transactions.transaction_type = 'credit'
+    AND transactions.balance_type = 'withdrawable'
+    AND transactions.status = 'completed'
+    -- Currency filter using standard hierarchy
+    [[ AND UPPER(COALESCE(
+           transactions.metadata->>'currency',
+           transactions.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY transactions.player_id
+),
+
+/* Step 2: Count deposits WITHIN the cohort month for each FTD */
+ftd_deposit_counts AS (
+  SELECT 
+    pfd.cohort_month,
+    pfd.player_id,
+    COUNT(*) as deposits_in_cohort_month
+  FROM player_first_deposit pfd
+  INNER JOIN transactions t ON pfd.player_id = t.player_id
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND DATE_TRUNC('month', t.created_at)::date = pfd.cohort_month
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           (SELECT wallet_currency FROM players WHERE id = pfd.player_id),
+           (SELECT currency FROM companies WHERE id = (SELECT company_id FROM players WHERE id = pfd.player_id))
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY pfd.cohort_month, pfd.player_id
+),
+
+/* Step 3: Calculate EXACT bucket distribution for each month */
+monthly_bucket_counts AS (
+  SELECT
+    cohort_month,
+    COUNT(CASE WHEN deposits_in_cohort_month = 1 THEN 1 END) as bucket_1,
+    COUNT(CASE WHEN deposits_in_cohort_month = 2 THEN 1 END) as bucket_2,
+    COUNT(CASE WHEN deposits_in_cohort_month = 3 THEN 1 END) as bucket_3,
+    COUNT(CASE WHEN deposits_in_cohort_month = 4 THEN 1 END) as bucket_4,
+    COUNT(CASE WHEN deposits_in_cohort_month = 5 THEN 1 END) as bucket_5,
+    COUNT(CASE WHEN deposits_in_cohort_month = 6 THEN 1 END) as bucket_6,
+    COUNT(CASE WHEN deposits_in_cohort_month >= 7 THEN 1 END) as bucket_7_plus,
+    COUNT(*) as total_cohort
+  FROM ftd_deposit_counts
+  GROUP BY cohort_month
+),
+
+/* Step 4: Calculate column totals (sum of counts across all months) */
+column_totals AS (
+  SELECT
+    NULL::date as cohort_month,
+    SUM(bucket_1) as bucket_1,
+    SUM(bucket_2) as bucket_2,
+    SUM(bucket_3) as bucket_3,
+    SUM(bucket_4) as bucket_4,
+    SUM(bucket_5) as bucket_5,
+    SUM(bucket_6) as bucket_6,
+    SUM(bucket_7_plus) as bucket_7_plus,
+    SUM(total_cohort) as total_cohort
+  FROM monthly_bucket_counts
+),
+
+/* Step 5: Union monthly data with totals row */
+all_rows AS (
+  SELECT 
+    cohort_month,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_cohort,
+    0 as sort_order
+  FROM monthly_bucket_counts
+  
+  UNION ALL
+  
+  SELECT 
+    cohort_month,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_cohort,
+    1 as sort_order
+  FROM column_totals
+)
+
+/* Final Output - Monthly data with percentages and totals row */
+SELECT 
+  CASE 
+    WHEN cohort_month IS NULL THEN 'TOTALS'
+    ELSE TO_CHAR(cohort_month, 'FMMonth YYYY')
+  END as "Month",
+  ROUND(bucket_1::numeric / NULLIF(total_cohort, 0) * 100, 1) as "1 time",
+  ROUND(bucket_2::numeric / NULLIF(total_cohort, 0) * 100, 1) as "2 times",
+  ROUND(bucket_3::numeric / NULLIF(total_cohort, 0) * 100, 1) as "3 times",
+  ROUND(bucket_4::numeric / NULLIF(total_cohort, 0) * 100, 1) as "4 times",
+  ROUND(bucket_5::numeric / NULLIF(total_cohort, 0) * 100, 1) as "5 times",
+  ROUND(bucket_6::numeric / NULLIF(total_cohort, 0) * 100, 1) as "6 times",
+  ROUND(bucket_7_plus::numeric / NULLIF(total_cohort, 0) * 100, 1) as "7+ times",
+  ROUND((bucket_1 + bucket_2 + bucket_3 + bucket_4 + bucket_5 + bucket_6 + bucket_7_plus)::numeric / NULLIF(total_cohort, 0) * 100, 1) as "Total"
+FROM all_rows
+ORDER BY CASE WHEN sort_order = 1 THEN 1 ELSE 0 END DESC, 
+         cohort_month DESC;
+
+-------------
+
+/* ============================================
+   EXISTING DEPOSITORS COHORT - PRODUCTION QUERY
+   Full dataset aggregation by months with complete filter suite
+   Shows unique count of existing depositors by EXACT deposit frequency within each month
+   One row per month across entire available data
+   
+   Existing Depositor = first_ever_deposit BEFORE that month
+   Deposit count = EXACT number of deposits made DURING each month
+   
+   LOGIC: Count deposits WITHIN the month only
+   - "1 deposit" = EXACTLY 1 deposit in that month
+   - "2 deposits" = EXACTLY 2 deposits in that month
+   - Each depositor appears in ONE column only
+   - Row total = unique active existing depositors that month
+   - Column totals = sum across all months
+   
+   FILTERS: Brand, Country, Traffic Source, Affiliate, Registration Launcher, Test Account, Currency
+   DATE RANGE: Optional start_date and end_date (defaults to all available data)
+   PARAMETERS: start_date, end_date, currency_filter, brand, country, traffic_source, affiliate_id, affiliate_name, registration_launcher, is_test_account
+   ============================================ */
+
+WITH
+
+/* --- Optional inputs: empty by default, 1 row when provided --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize window (no inputs → all available data) --- */
+bounds_raw AS (
+  SELECT  
+    COALESCE((SELECT MAX(end_date) FROM end_input), CURRENT_DATE) AS end_date_raw,
+    (SELECT MAX(start_date) FROM start_input) AS start_date_raw
+),
+bounds AS (
+  SELECT  
+    end_date_raw AS end_date,
+    /* default start = beginning of all data; if user set start, use it */
+    CASE
+      WHEN start_date_raw IS NULL THEN (SELECT MIN(DATE_TRUNC('month', created_at))::date FROM transactions WHERE transaction_category = 'deposit')
+      WHEN start_date_raw > end_date_raw THEN end_date_raw
+      ELSE start_date_raw
+    END AS start_date  
+  FROM bounds_raw
+),
+
+/* --- Step 1: Get all months in analysis period --- */
+all_months AS (
+  SELECT DISTINCT DATE_TRUNC('month', d)::date AS month_start
+  FROM generate_series(
+         (SELECT start_date FROM bounds),
+         (SELECT end_date FROM bounds),
+         INTERVAL '1 month'
+       ) AS d
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+    END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 2: Identify first deposit date for all filtered players --- */
+player_first_deposit AS (
+  SELECT 
+    transactions.player_id,
+    MIN(transactions.created_at) as first_deposit_date
+  FROM transactions
+  INNER JOIN filtered_players fp ON transactions.player_id = fp.player_id
+  JOIN players ON players.id = transactions.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE transactions.transaction_category = 'deposit'
+    AND transactions.transaction_type = 'credit'
+    AND transactions.balance_type = 'withdrawable'
+    AND transactions.status = 'completed'
+    AND transactions.created_at >= (SELECT start_date FROM bounds)
+    AND transactions.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    -- Currency filter using standard hierarchy
+    [[ AND UPPER(COALESCE(
+           transactions.metadata->>'currency',
+           transactions.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY transactions.player_id
+),
+
+/* --- Step 3: Filter to EXISTING DEPOSITORS for each month --- */
+/* Existing = first deposit occurred BEFORE the month being analyzed */
+existing_depositors_by_month AS (
+  SELECT 
+    am.month_start,
+    pfd.player_id,
+    pfd.first_deposit_date
+  FROM all_months am
+  CROSS JOIN player_first_deposit pfd
+  INNER JOIN filtered_players fp ON pfd.player_id = fp.player_id
+  WHERE pfd.first_deposit_date < am.month_start
+),
+
+/* --- Step 4: Count deposits per existing depositor per month with currency filter --- */
+monthly_deposit_counts AS (
+  SELECT 
+    edbm.month_start,
+    edbm.player_id,
+    COUNT(*) as deposits_in_month
+  FROM existing_depositors_by_month edbm
+  INNER JOIN transactions t ON edbm.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND DATE_TRUNC('month', t.created_at)::date = edbm.month_start
+    -- Currency filter using standard hierarchy
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY edbm.month_start, edbm.player_id
+),
+
+/* --- Step 5: Calculate EXACT bucket distribution for each month --- */
+monthly_bucket_counts AS (
+  SELECT
+    month_start,
+    -- EXACT deposit count buckets
+    COUNT(CASE WHEN deposits_in_month = 1 THEN 1 END) as bucket_1,
+    COUNT(CASE WHEN deposits_in_month = 2 THEN 1 END) as bucket_2,
+    COUNT(CASE WHEN deposits_in_month = 3 THEN 1 END) as bucket_3,
+    COUNT(CASE WHEN deposits_in_month = 4 THEN 1 END) as bucket_4,
+    COUNT(CASE WHEN deposits_in_month = 5 THEN 1 END) as bucket_5,
+    COUNT(CASE WHEN deposits_in_month = 6 THEN 1 END) as bucket_6,
+    COUNT(CASE WHEN deposits_in_month >= 7 THEN 1 END) as bucket_7_plus,
+    -- Total active existing depositors
+    COUNT(*) as total_active
+  FROM monthly_deposit_counts
+  GROUP BY month_start
+),
+
+/* --- Step 6: Calculate column totals --- */
+column_totals AS (
+  SELECT
+    NULL::date as month_start,
+    SUM(bucket_1) as bucket_1,
+    SUM(bucket_2) as bucket_2,
+    SUM(bucket_3) as bucket_3,
+    SUM(bucket_4) as bucket_4,
+    SUM(bucket_5) as bucket_5,
+    SUM(bucket_6) as bucket_6,
+    SUM(bucket_7_plus) as bucket_7_plus,
+    SUM(total_active) as total_active
+  FROM monthly_bucket_counts
+),
+
+/* --- Step 7: Union monthly data with totals row --- */
+all_rows AS (
+  SELECT 
+    month_start,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_active,
+    0 as sort_order
+  FROM monthly_bucket_counts
+  WHERE total_active > 0  -- Exclude empty months
+  
+  UNION ALL
+  
+  SELECT 
+    month_start,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_active,
+    1 as sort_order
+  FROM column_totals
+)
+
+/* --- Final Output: Monthly data with totals row --- */
+SELECT 
+  CASE 
+    WHEN month_start IS NULL THEN 'TOTALS'
+    ELSE TO_CHAR(month_start, 'FMMonth YYYY')
+  END as "Month",
+  bucket_1 as "1 deposit",
+  bucket_2 as "2 deposits",
+  bucket_3 as "3 deposits",
+  bucket_4 as "4 deposits",
+  bucket_5 as "5 deposits",
+  bucket_6 as "6 deposits",
+  bucket_7_plus as "7+ deposits",
+  total_active as "Total Active Existing Depositors"
+FROM all_rows
+ORDER BY CASE WHEN sort_order = 1 THEN 1 ELSE 0 END DESC, 
+         month_start DESC;
+
+--------------------
+
+/* ============================================
+   EXISTING DEPOSITORS COHORT (%) - PRODUCTION QUERY
+   Full dataset aggregation by months with complete filter suite
+   Shows percentage distribution of existing depositors by EXACT deposit frequency within each month
+   One row per month across entire available data
+   
+   Existing Depositor = first_ever_deposit BEFORE that month
+   Percentage = (Depositors in bucket / Total existing depositors) * 100
+   
+   LOGIC: Count deposits WITHIN the month only
+   - "1 deposit" = EXACTLY 1 deposit in that month
+   - "2 deposits" = EXACTLY 2 deposits in that month
+   - Each depositor appears in ONE column only
+   - Row total = 100%
+   - Column totals = percentage distribution across all months
+   
+   FILTERS: Brand, Country, Traffic Source, Affiliate, Registration Launcher, Test Account, Currency
+   DATE RANGE: Optional start_date and end_date (defaults to all available data)
+   PARAMETERS: start_date, end_date, currency_filter, brand, country, traffic_source, affiliate_id, affiliate_name, registration_launcher, is_test_account
+   ============================================ */
+
+WITH
+
+/* --- Optional inputs: empty by default, 1 row when provided --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+
+/* --- Normalize window (no inputs → all available data) --- */
+bounds_raw AS (
+  SELECT  
+    COALESCE((SELECT MAX(end_date) FROM end_input), CURRENT_DATE) AS end_date_raw,
+    (SELECT MAX(start_date) FROM start_input) AS start_date_raw
+),
+bounds AS (
+  SELECT  
+    end_date_raw AS end_date,
+    /* default start = beginning of all data; if user set start, use it */
+    CASE
+      WHEN start_date_raw IS NULL THEN (SELECT MIN(DATE_TRUNC('month', created_at))::date FROM transactions WHERE transaction_category = 'deposit')
+      WHEN start_date_raw > end_date_raw THEN end_date_raw
+      ELSE start_date_raw
+    END AS start_date  
+  FROM bounds_raw
+),
+
+/* --- Step 1: Get all months in analysis period --- */
+all_months AS (
+  SELECT DISTINCT DATE_TRUNC('month', d)::date AS month_start
+  FROM generate_series(
+         (SELECT start_date FROM bounds),
+         (SELECT end_date FROM bounds),
+         INTERVAL '1 month'
+       ) AS d
+),
+
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+    END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
+),
+
+/* Step 2: Identify first deposit date for all filtered players --- */
+player_first_deposit AS (
+  SELECT 
+    transactions.player_id,
+    MIN(transactions.created_at) as first_deposit_date
+  FROM transactions
+  INNER JOIN filtered_players fp ON transactions.player_id = fp.player_id
+  JOIN players ON players.id = transactions.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE transactions.transaction_category = 'deposit'
+    AND transactions.transaction_type = 'credit'
+    AND transactions.balance_type = 'withdrawable'
+    AND transactions.status = 'completed'
+    AND transactions.created_at >= (SELECT start_date FROM bounds)
+    AND transactions.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    -- Currency filter using standard hierarchy
+    [[ AND UPPER(COALESCE(
+           transactions.metadata->>'currency',
+           transactions.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY transactions.player_id
+),
+
+/* --- Step 3: Filter to EXISTING DEPOSITORS for each month --- */
+/* Existing = first deposit occurred BEFORE the month being analyzed */
+existing_depositors_by_month AS (
+  SELECT 
+    am.month_start,
+    pfd.player_id,
+    pfd.first_deposit_date
+  FROM all_months am
+  CROSS JOIN player_first_deposit pfd
+  INNER JOIN filtered_players fp ON pfd.player_id = fp.player_id
+  WHERE pfd.first_deposit_date < am.month_start
+),
+
+/* --- Step 4: Count deposits per existing depositor per month with currency filter --- */
+monthly_deposit_counts AS (
+  SELECT 
+    edbm.month_start,
+    edbm.player_id,
+    COUNT(*) as deposits_in_month
+  FROM existing_depositors_by_month edbm
+  INNER JOIN transactions t ON edbm.player_id = t.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND DATE_TRUNC('month', t.created_at)::date = edbm.month_start
+    -- Currency filter using standard hierarchy
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY edbm.month_start, edbm.player_id
+),
+
+/* --- Step 5: Calculate EXACT bucket distribution for each month --- */
+monthly_bucket_counts AS (
+  SELECT
+    month_start,
+    -- EXACT deposit count buckets
+    COUNT(CASE WHEN deposits_in_month = 1 THEN 1 END) as bucket_1,
+    COUNT(CASE WHEN deposits_in_month = 2 THEN 1 END) as bucket_2,
+    COUNT(CASE WHEN deposits_in_month = 3 THEN 1 END) as bucket_3,
+    COUNT(CASE WHEN deposits_in_month = 4 THEN 1 END) as bucket_4,
+    COUNT(CASE WHEN deposits_in_month = 5 THEN 1 END) as bucket_5,
+    COUNT(CASE WHEN deposits_in_month = 6 THEN 1 END) as bucket_6,
+    COUNT(CASE WHEN deposits_in_month >= 7 THEN 1 END) as bucket_7_plus,
+    -- Total active existing depositors
+    COUNT(*) as total_active
+  FROM monthly_deposit_counts
+  GROUP BY month_start
+),
+
+/* --- Step 6: Calculate column totals --- */
+column_totals AS (
+  SELECT
+    NULL::date as month_start,
+    SUM(bucket_1) as bucket_1,
+    SUM(bucket_2) as bucket_2,
+    SUM(bucket_3) as bucket_3,
+    SUM(bucket_4) as bucket_4,
+    SUM(bucket_5) as bucket_5,
+    SUM(bucket_6) as bucket_6,
+    SUM(bucket_7_plus) as bucket_7_plus,
+    SUM(total_active) as total_active
+  FROM monthly_bucket_counts
+),
+
+/* --- Step 7: Union monthly data with totals row --- */
+all_rows AS (
+  SELECT 
+    month_start,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_active,
+    0 as sort_order
+  FROM monthly_bucket_counts
+  WHERE total_active > 0  -- Exclude empty months
+  
+  UNION ALL
+  
+  SELECT 
+    month_start,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_active,
+    1 as sort_order
+  FROM column_totals
+)
+
+/* --- Final Output: Monthly data with percentages and totals row --- */
+SELECT 
+  CASE 
+    WHEN month_start IS NULL THEN 'TOTALS'
+    ELSE TO_CHAR(month_start, 'FMMonth YYYY')
+  END as "Month",
+  ROUND(bucket_1::numeric / NULLIF(total_active, 0) * 100, 1) as "1 deposit",
+  ROUND(bucket_2::numeric / NULLIF(total_active, 0) * 100, 1) as "2 deposits",
+  ROUND(bucket_3::numeric / NULLIF(total_active, 0) * 100, 1) as "3 deposits",
+  ROUND(bucket_4::numeric / NULLIF(total_active, 0) * 100, 1) as "4 deposits",
+  ROUND(bucket_5::numeric / NULLIF(total_active, 0) * 100, 1) as "5 deposits",
+  ROUND(bucket_6::numeric / NULLIF(total_active, 0) * 100, 1) as "6 deposits",
+  ROUND(bucket_7_plus::numeric / NULLIF(total_active, 0) * 100, 1) as "7+ deposits",
+  ROUND((bucket_1 + bucket_2 + bucket_3 + bucket_4 + bucket_5 + bucket_6 + bucket_7_plus)::numeric / NULLIF(total_active, 0) * 100, 1) as "Total"
+FROM all_rows
+ORDER BY CASE WHEN sort_order = 1 THEN 1 ELSE 0 END DESC, 
+         month_start DESC;
+
+--------------------
+
+/**
+=============================================================================
+COHORT LTV LIFETIME REPORT - FINAL CORRECTED SQL
+Gaming/Casino Platform Analytics - WITH REVISED CALCULATIONS
+=============================================================================
+* FIX 1: Bulletproof Currency Logic - All monetary calculations now use the CASE statement for EUR conversion and handle NULLs.
+* FIX 2: Correct Hierarchical Sorting - The report now sorts with TOTAL on top, followed by the latest months.
+* FIX 3: All other filters (device, etc.) are standardized.
+*/
+
+WITH 
+/**
+---------------------------------------------------------------------------
+STEP 1: DATE BOUNDS - Determine reporting window
+---------------------------------------------------------------------------
+*/
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
+),
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
+),
+bounds AS (
+  SELECT
+    COALESCE((SELECT MAX(end_date) FROM end_input), CURRENT_DATE) AS end_date,
+    COALESCE((SELECT MAX(start_date) FROM start_input), CURRENT_DATE - INTERVAL '24 months') AS start_date
+),
+
+/**
+---------------------------------------------------------------------------
+STEP 2: FILTERED PLAYERS - Apply all global filters as gatekeeper
+---------------------------------------------------------------------------
+*/
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]
+    [[ AND players.country = CASE {{country}} WHEN 'Romania' THEN 'RO' WHEN 'France' THEN 'FR' WHEN 'Germany' THEN 'DE' WHEN 'Cyprus' THEN 'CY' WHEN 'Poland' THEN 'PL' WHEN 'Spain' THEN 'ES' WHEN 'Italy' THEN 'IT' WHEN 'Canada' THEN 'CA' WHEN 'Australia' THEN 'AU' WHEN 'United Kingdom' THEN 'GB' WHEN 'Finland' THEN 'FI' WHEN 'Albania' THEN 'AL' WHEN 'Austria' THEN 'AT' WHEN 'Belgium' THEN 'BE' WHEN 'Brazil' THEN 'BR' WHEN 'Bulgaria' THEN 'BG' WHEN 'Georgia' THEN 'GE' WHEN 'Greece' THEN 'GR' WHEN 'Hungary' THEN 'HU' WHEN 'India' THEN 'IN' WHEN 'Netherlands' THEN 'NL' WHEN 'Portugal' THEN 'PT' WHEN 'Singapore' THEN 'SG' WHEN 'Turkey' THEN 'TR' WHEN 'United Arab Emirates' THEN 'AE' WHEN 'Afghanistan' THEN 'AF' WHEN 'Armenia' THEN 'AM' WHEN 'Denmark' THEN 'DK' WHEN 'Algeria' THEN 'DZ' WHEN 'Andorra' THEN 'AD' END ]]
+    [[ AND CASE WHEN {{traffic_source}} = 'Organic' THEN players.affiliate_id IS NULL WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL ELSE TRUE END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+    [[ AND {{is_test_account}} ]]
+),
+
+/**
+---------------------------------------------------------------------------
+STEP 3: PLAYER COHORTS - Register all filtered players with their cohort
+---------------------------------------------------------------------------
+*/
+player_cohorts AS (
+  SELECT p.id AS player_id, p.created_at AS registration_ts, DATE_TRUNC('month', p.created_at)::date AS registration_month, p.company_id
+  FROM players p
+  INNER JOIN filtered_players fp ON p.id = fp.player_id
+  WHERE p.created_at >= (SELECT start_date FROM bounds) AND p.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+),
+
+/**
+---------------------------------------------------------------------------
+STEP 4: FTD DATA - Identify first deposits per player
+---------------------------------------------------------------------------
+*/
+ftd_data AS (
+  SELECT t.player_id, MIN(t.created_at) AS first_deposit_ts
+  FROM transactions t
+  INNER JOIN player_cohorts pc ON t.player_id = pc.player_id
+  JOIN players ON players.id = t.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE t.transaction_category = 'deposit' AND t.transaction_type = 'credit' AND t.status = 'completed' AND t.balance_type = 'withdrawable'
+    [[ AND UPPER(COALESCE(t.metadata->>'currency', t.cash_currency, players.wallet_currency, companies.currency)) IN ({{currency_filter}}) ]]
+  GROUP BY t.player_id
+),
+
+/**
+---------------------------------------------------------------------------
+STEP 5: DEPOSIT & WITHDRAWAL METRICS (WITH CURRENCY LOGIC)
+---------------------------------------------------------------------------
+*/
+deposit_withdrawal_metrics AS (
+  SELECT pc.registration_month,
+    COALESCE(SUM(CASE WHEN t.transaction_category = 'deposit' AND t.transaction_type = 'credit' AND t.status = 'completed' AND t.balance_type = 'withdrawable'
+      THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS total_deposits,
+    COALESCE(SUM(CASE WHEN t.transaction_category = 'withdrawal' AND t.transaction_type = 'debit' AND t.status = 'completed' AND t.balance_type = 'withdrawable'
+      THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS total_withdrawals
+  FROM player_cohorts pc
+  LEFT JOIN transactions t ON pc.player_id = t.player_id
+  JOIN players ON players.id = pc.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(t.metadata->>'currency', t.cash_currency, players.wallet_currency, companies.currency)) IN ({{currency_filter}}) ]]
+  GROUP BY pc.registration_month
+),
+
+/**
+---------------------------------------------------------------------------
+STEP 6: GGR METRICS (WITH CURRENCY LOGIC)
+---------------------------------------------------------------------------
+*/
+ggr_metrics AS (
+  SELECT pc.registration_month,
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'game_bet' AND t.balance_type = 'withdrawable' AND t.status = 'completed' THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS cash_bet,
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'game_bet' AND t.balance_type = 'withdrawable' AND t.status = 'completed' THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS cash_win,
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'bonus' AND t.balance_type = 'non-withdrawable' AND t.status = 'completed' THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS promo_bet,
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'bonus' AND t.balance_type = 'non-withdrawable' AND t.status = 'completed' THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS promo_win
+  FROM player_cohorts pc
+  LEFT JOIN transactions t ON pc.player_id = t.player_id
+  JOIN players ON players.id = pc.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(t.metadata->>'currency', t.cash_currency, players.wallet_currency, companies.currency)) IN ({{currency_filter}}) ]]
+  GROUP BY pc.registration_month
+),
+
+/**
+---------------------------------------------------------------------------
+STEP 7: BONUS COST METRICS (WITH CURRENCY LOGIC)
+---------------------------------------------------------------------------
+*/
+bonus_cost_metrics AS (
+  SELECT pc.registration_month,
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'bonus_completion' AND t.status = 'completed' AND t.balance_type = 'withdrawable'
+      THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS total_bonus_cost
+  FROM player_cohorts pc
+  LEFT JOIN transactions t ON pc.player_id = t.player_id
+  JOIN players ON players.id = pc.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND UPPER(COALESCE(t.metadata->>'currency', t.cash_currency, players.wallet_currency, companies.currency)) IN ({{currency_filter}}) ]]
+  GROUP BY pc.registration_month
+),
+
+/**
+---------------------------------------------------------------------------
+STEP 8: COHORT LIFETIME METRICS - Combine all aggregations
+---------------------------------------------------------------------------
+*/
+cohort_lifetime_metrics AS (
+  SELECT
+    pc.registration_month,
+    COUNT(DISTINCT pc.player_id) AS total_registrations,
+    COUNT(DISTINCT ftd.player_id) AS ftd_count,
+    COALESCE(dwm.total_deposits, 0) AS total_deposits,
+    COALESCE(dwm.total_withdrawals, 0) AS total_withdrawals,
+    COALESCE(ggr.cash_bet, 0) AS cash_bet,
+    COALESCE(ggr.cash_win, 0) AS cash_win,
+    COALESCE(ggr.promo_bet, 0) AS promo_bet,
+    COALESCE(ggr.promo_win, 0) AS promo_win,
+    COALESCE(bcm.total_bonus_cost, 0) AS total_bonus_cost
+  FROM player_cohorts pc
+  LEFT JOIN ftd_data ftd ON pc.player_id = ftd.player_id
+  LEFT JOIN deposit_withdrawal_metrics dwm ON pc.registration_month = dwm.registration_month
+  LEFT JOIN ggr_metrics ggr ON pc.registration_month = ggr.registration_month
+  LEFT JOIN bonus_cost_metrics bcm ON pc.registration_month = bcm.registration_month
+  GROUP BY pc.registration_month, dwm.total_deposits, dwm.total_withdrawals, ggr.cash_bet, ggr.cash_win, ggr.promo_bet, ggr.promo_win, bcm.total_bonus_cost
+),
+
+/**
+---------------------------------------------------------------------------
+STEP 9: FINAL REPORT DATA - Calculate fees, NGR, Net Revenue, and LTV
+---------------------------------------------------------------------------
+*/
+final_report_data AS (
+  SELECT
+    0 AS sort_order,
+    -- [FIX FOR SORTING] Keep the original date for sorting
+    registration_month,
+    TO_CHAR(registration_month, 'FMMonth YYYY') AS month_year,
+    total_registrations AS REG,
+    ftd_count AS FTD,
+    ROUND(CASE WHEN total_registrations > 0 THEN ftd_count::numeric / total_registrations * 100 ELSE 0 END, 2) AS conversion_rate,
+    ROUND(CASE WHEN ftd_count > 0 THEN (((cash_bet + promo_bet - cash_win - promo_win) * 0.90) - ((total_deposits + total_withdrawals) * 0.08) - total_bonus_cost)::numeric / ftd_count ELSE 0 END, 2) AS ltv,
+    ROUND(total_deposits, 2) AS deposit,
+    ROUND(total_withdrawals, 2) AS wd,
+    ROUND(cash_bet + promo_bet - cash_win - promo_win, 2) AS ggr,
+    ROUND((cash_bet + promo_bet - cash_win - promo_win) * 0.09, 2) AS provider_fee,
+    ROUND((total_deposits + total_withdrawals) * 0.08, 2) AS payment_fee,
+    ROUND((cash_bet + promo_bet - cash_win - promo_win) * 0.01, 2) AS platform_fee,
+    ROUND(total_bonus_cost, 2) AS bonus_cost,
+    ROUND((cash_bet + promo_bet - cash_win - promo_win) - ((cash_bet + promo_bet - cash_win - promo_win) * 0.09) - ((total_deposits + total_withdrawals) * 0.08) - ((cash_bet + promo_bet - cash_win - promo_win) * 0.01), 2) AS ngr,
+    ROUND(((cash_bet + promo_bet - cash_win - promo_win) - ((cash_bet + promo_bet - cash_win - promo_win) * 0.09) - ((total_deposits + total_withdrawals) * 0.08) - ((cash_bet + promo_bet - cash_win - promo_win) * 0.01)) - total_bonus_cost, 2) AS net_revenue
+  FROM cohort_lifetime_metrics
+)
+
+/**
+---------------------------------------------------------------------------
+FINAL OUTPUT - Combine TOTAL row with individual month rows
+---------------------------------------------------------------------------
+*/
+SELECT 
+  -1 AS sort_order,
+  NULL::date as registration_month, -- Add NULL date for consistent column structure
+  'TOTAL' AS month_year,
+  SUM(REG) AS REG,
+  SUM(FTD) AS FTD,
+  ROUND(SUM(FTD)::numeric / NULLIF(SUM(REG), 0) * 100, 2) AS conversion_rate,
+  ROUND(SUM(net_revenue)::numeric / NULLIF(SUM(FTD), 0), 2) AS ltv,
+  ROUND(SUM(deposit), 2) AS deposit,
+  ROUND(SUM(wd), 2) AS wd,
+  ROUND(SUM(ggr), 2) AS ggr,
+  ROUND(SUM(provider_fee), 2) AS provider_fee,
+  ROUND(SUM(payment_fee), 2) AS payment_fee,
+  ROUND(SUM(platform_fee), 2) AS platform_fee,
+  ROUND(SUM(bonus_cost), 2) AS bonus_cost,
+  ROUND(SUM(ngr), 2) AS ngr,
+  ROUND(SUM(net_revenue), 2) AS net_revenue
+FROM final_report_data
+
+UNION ALL
+
+SELECT
+  sort_order,
+  registration_month,
+  month_year,
+  REG,
+  FTD,
+  conversion_rate,
+  ltv,
+  deposit,
+  wd,
+  ggr,
+  provider_fee,
+  payment_fee,
+  platform_fee,
+  bonus_cost,
+  ngr,
+  net_revenue
+FROM final_report_data
+
+
+ORDER BY sort_order, registration_month DESC;
