@@ -1,181 +1,235 @@
-# NEW DEPOSITORS COHORT
-
-/\* \============================================  
-   NEW DEPOSITORS COHORT \- DYNAMIC DATE RANGE  
-   Shows unique count of new depositors reaching each deposit milestone  
-   One row per month within user-selected date range  
-   New Depositor \= first\_ever\_deposit in that specific month  
-     
-   FILTERS: Brand, Country, Traffic Source, Affiliate, Registration Launcher, Test Account, Currency  
-   PARAMETERS: start\_month, end\_month (DATE), currency\_filter, brand, country, traffic\_source, affiliate\_id, affiliate\_name, registration\_launcher, is\_test\_account  
-   \============================================ \*/
+/* ============================================
+   NEW DEPOSITORS COHORT - DYNAMIC DATE RANGE
+   Shows unique count of new depositors by EXACT deposit frequency in their cohort month
+   One row per month within user-selected date range
+   New Depositor = first_ever_deposit in that specific month
+   
+   LOGIC: Count deposits WITHIN the cohort month only
+   - "1 time" = EXACTLY 1 deposit in that month
+   - "2 times" = EXACTLY 2 deposits in that month
+   - Each FTD appears in ONE column only
+   - Row total = unique FTD count
+   - Column totals = sum across all months
+   
+   FILTERS: Brand, Country, Traffic Source, Affiliate, Registration Launcher, Test Account, Currency
+   PARAMETERS: start_date, end_date (DATE), currency_filter, brand, country, traffic_source, affiliate_id, affiliate_name, registration_launcher, is_test_account
+   ============================================ */
 
 WITH
 
-/\* \--- Month range inputs (user-selectable) \--- \*/
-start\_input AS (
-  SELECT NULL::date AS start\_month WHERE FALSE
-  \[\[ UNION ALL SELECT {{start\_date}}::date \]\]
+/* --- Date range inputs (user-selectable) --- */
+start_input AS (
+  SELECT NULL::date AS start_date WHERE FALSE
+  [[ UNION ALL SELECT {{start_date}}::date ]]
 ),
-end\_input AS (
-  SELECT NULL::date AS end\_month WHERE FALSE
-  \[\[ UNION ALL SELECT {{end\_date}}::date \]\]
-),
-
-/\* \--- Normalize analysis window (defaults to last 12 months if not specified) \--- \*/  
-analysis\_period AS (  
-  SELECT   
-    COALESCE(  
-      (SELECT start\_month FROM start\_input),  
-      (SELECT DATE\_TRUNC('month', MAX(created\_at) \- INTERVAL '11 months')::date FROM transactions)  
-    ) AS month\_start,  
-    COALESCE(  
-      (SELECT end\_month FROM end\_input),  
-      (SELECT DATE\_TRUNC('month', MAX(created\_at))::date FROM transactions)  
-    ) AS month\_end  
+end_input AS (
+  SELECT NULL::date AS end_date WHERE FALSE
+  [[ UNION ALL SELECT {{end_date}}::date ]]
 ),
 
-/\* \--- Get all months in the analysis period \--- \*/  
-available\_months AS (  
-  SELECT DATE\_TRUNC('month', d)::date AS month\_start  
-  FROM GENERATE\_SERIES(  
-    (SELECT month\_start FROM analysis\_period),  
-    (SELECT month\_end FROM analysis\_period),  
-    INTERVAL '1 month'  
-  ) AS d  
+/* --- Normalize analysis window (defaults to last 12 months if not specified) --- */
+analysis_period AS (
+  SELECT 
+    COALESCE(
+      (SELECT start_date FROM start_input),
+      (SELECT DATE_TRUNC('month', MAX(created_at) - INTERVAL '11 months')::date FROM transactions)
+    ) AS month_start,
+    COALESCE(
+      (SELECT end_date FROM end_input),
+      (SELECT DATE_TRUNC('month', MAX(created_at))::date FROM transactions)
+    ) AS month_end
 ),
 
-/\* \---------- FILTERED PLAYERS (NO ALIASES for Field Filters) \---------- \*/  
-filtered\_players AS (  
-  SELECT DISTINCT players.id AS player\_id  
-  FROM players  
-  LEFT JOIN companies ON companies.id \= players.company\_id  
-  WHERE 1=1  
-    \[\[ AND {{brand}} \]\]              \-- Field Filter → Companies.name  
-    \[\[ AND players.country \= CASE {{country}}  
-    WHEN 'Romania' THEN 'RO'  
-    WHEN 'France' THEN 'FR'  
-    WHEN 'Germany' THEN 'DE'  
-    WHEN 'Cyprus' THEN 'CY'  
-    WHEN 'Poland' THEN 'PL'  
-    WHEN 'Spain' THEN 'ES'  
-    WHEN 'Italy' THEN 'IT'  
-    WHEN 'Canada' THEN 'CA'  
-    WHEN 'Australia' THEN 'AU'  
-    WHEN 'United Kingdom' THEN 'GB'  
-    WHEN 'Finland' THEN 'FI'  
-    WHEN 'Albania' THEN 'AL'  
-    WHEN 'Austria' THEN 'AT'  
-    WHEN 'Belgium' THEN 'BE'  
-    WHEN 'Brazil' THEN 'BR'  
-    WHEN 'Bulgaria' THEN 'BG'  
-    WHEN 'Georgia' THEN 'GE'  
-    WHEN 'Greece' THEN 'GR'  
-    WHEN 'Hungary' THEN 'HU'  
-    WHEN 'India' THEN 'IN'  
-    WHEN 'Netherlands' THEN 'NL'  
-    WHEN 'Portugal' THEN 'PT'  
-    WHEN 'Singapore' THEN 'SG'  
-    WHEN 'Turkey' THEN 'TR'  
-    WHEN 'United Arab Emirates' THEN 'AE'  
-    WHEN 'Afghanistan' THEN 'AF'  
-    WHEN 'Armenia' THEN 'AM'  
-    WHEN 'Denmark' THEN 'DK'  
-    WHEN 'Algeria' THEN 'DZ'  
-    WHEN 'Andorra' THEN 'AD'  
-    END \]\]
-
-    \-- Text/Category variables (optional)  
-    \[\[ AND CASE  
-           WHEN {{traffic\_source}} \= 'Organic'   THEN players.affiliate\_id IS NULL  
-           WHEN {{traffic\_source}} \= 'Affiliate' THEN players.affiliate\_id IS NOT NULL  
-           ELSE TRUE  
-         END \]\]  
-    \[\[ AND {{affiliate\_id}} \]\]
-    \[\[ AND {{affiliate\_name}} \]\]
-    \[\[ AND CONCAT(players.os, ' / ', players.browser) \= {{registration\_launcher}} \]\]
-
-    \-- TEST ACCOUNT as a Field Filter → Players.is\_test\_account (boolean)  
-    \[\[ AND {{is\_test\_account}} \]\]  
+/* --- Get all months in the analysis period --- */
+available_months AS (
+  SELECT DATE_TRUNC('month', d)::date AS month_start
+  FROM GENERATE_SERIES(
+    (SELECT month_start FROM analysis_period),
+    (SELECT month_end FROM analysis_period),
+    INTERVAL '1 month'
+  ) AS d
 ),
 
-/\* Step 1: Calculate lifetime deposit count and first deposit date for ALL filtered players \*/  
-player\_lifetime\_deposits AS (  
-  SELECT   
-    transactions.player\_id,  
-    COUNT(\*) as lifetime\_deposit\_count,  
-    MIN(transactions.created\_at) as first\_deposit\_date,  
-    MAX(transactions.created\_at) as last\_deposit\_date  
-  FROM transactions  
-  INNER JOIN filtered\_players ON transactions.player\_id \= filtered\_players.player\_id  
-  JOIN players ON players.id \= transactions.player\_id  
-  JOIN companies ON companies.id \= players.company\_id  
-  WHERE transactions.transaction\_category \= 'deposit'  
-    AND transactions.transaction\_type \= 'credit'  
-    AND transactions.balance\_type \= 'withdrawable'  
-    AND transactions.status \= 'completed'  
-    \-- Currency filter using standard hierarchy  
-    \[\[ AND UPPER(COALESCE(  
-           transactions.metadata-\>\>'currency',  
-           transactions.cash\_currency,  
-           players.wallet\_currency,  
-           companies.currency  
-         )) IN ({{currency\_filter}}) \]\]  
-  GROUP BY transactions.player\_id  
+/* ---------- FILTERED PLAYERS (NO ALIASES for Field Filters) ---------- */
+filtered_players AS (
+  SELECT DISTINCT players.id AS player_id
+  FROM players
+  LEFT JOIN companies ON companies.id = players.company_id
+  WHERE 1=1
+    [[ AND {{brand}} ]]              -- Field Filter → Companies.name
+    [[ AND players.country = CASE {{country}}
+    WHEN 'Romania' THEN 'RO'
+    WHEN 'France' THEN 'FR'
+    WHEN 'Germany' THEN 'DE'
+    WHEN 'Cyprus' THEN 'CY'
+    WHEN 'Poland' THEN 'PL'
+    WHEN 'Spain' THEN 'ES'
+    WHEN 'Italy' THEN 'IT'
+    WHEN 'Canada' THEN 'CA'
+    WHEN 'Australia' THEN 'AU'
+    WHEN 'United Kingdom' THEN 'GB'
+    WHEN 'Finland' THEN 'FI'
+    WHEN 'Albania' THEN 'AL'
+    WHEN 'Austria' THEN 'AT'
+    WHEN 'Belgium' THEN 'BE'
+    WHEN 'Brazil' THEN 'BR'
+    WHEN 'Bulgaria' THEN 'BG'
+    WHEN 'Georgia' THEN 'GE'
+    WHEN 'Greece' THEN 'GR'
+    WHEN 'Hungary' THEN 'HU'
+    WHEN 'India' THEN 'IN'
+    WHEN 'Netherlands' THEN 'NL'
+    WHEN 'Portugal' THEN 'PT'
+    WHEN 'Singapore' THEN 'SG'
+    WHEN 'Turkey' THEN 'TR'
+    WHEN 'United Arab Emirates' THEN 'AE'
+    WHEN 'Afghanistan' THEN 'AF'
+    WHEN 'Armenia' THEN 'AM'
+    WHEN 'Denmark' THEN 'DK'
+    WHEN 'Algeria' THEN 'DZ'
+    WHEN 'Andorra' THEN 'AD'
+    END ]]
+
+    -- Text/Category variables (optional)
+    [[ AND CASE
+           WHEN {{traffic_source}} = 'Organic'   THEN players.affiliate_id IS NULL
+           WHEN {{traffic_source}} = 'Affiliate' THEN players.affiliate_id IS NOT NULL
+           ELSE TRUE
+         END ]]
+    [[ AND {{affiliate_id}} ]]
+    [[ AND {{affiliate_name}} ]]
+    [[ AND CONCAT(players.os, ' / ', players.browser) = {{registration_launcher}} ]]
+
+    -- TEST ACCOUNT as a Field Filter → Players.is_test_account (boolean)
+    [[ AND {{is_test_account}} ]]
 ),
 
-/\* Step 2: For each month in analysis period, identify NEW DEPOSITORS (first deposit in that month) \*/  
-monthly\_cohorts AS (  
-  SELECT   
-    DATE\_TRUNC('month', pld.first\_deposit\_date)::date AS cohort\_month,  
-    pld.player\_id,  
-    pld.lifetime\_deposit\_count  
-  FROM player\_lifetime\_deposits pld  
-  INNER JOIN available\_months am ON DATE\_TRUNC('month', pld.first\_deposit\_date)::date \= am.month\_start  
+/* Step 1: Find first deposit date and identify FTD cohort month */
+player_first_deposit AS (
+  SELECT 
+    transactions.player_id,
+    MIN(transactions.created_at) as first_deposit_date,
+    DATE_TRUNC('month', MIN(transactions.created_at))::date AS cohort_month
+  FROM transactions
+  INNER JOIN filtered_players ON transactions.player_id = filtered_players.player_id
+  JOIN players ON players.id = transactions.player_id
+  JOIN companies ON companies.id = players.company_id
+  WHERE transactions.transaction_category = 'deposit'
+    AND transactions.transaction_type = 'credit'
+    AND transactions.balance_type = 'withdrawable'
+    AND transactions.status = 'completed'
+    -- Currency filter using standard hierarchy
+    [[ AND UPPER(COALESCE(
+           transactions.metadata->>'currency',
+           transactions.cash_currency,
+           players.wallet_currency,
+           companies.currency
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY transactions.player_id
 ),
 
-/\* Step 3: Calculate bucket distribution for each month \*/  
-monthly\_bucket\_counts AS (  
-  SELECT  
-    cohort\_month,  
-    \-- Individual buckets 1-10  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 1 THEN 1 END) as bucket\_1,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 2 THEN 1 END) as bucket\_2,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 3 THEN 1 END) as bucket\_3,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 4 THEN 1 END) as bucket\_4,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 5 THEN 1 END) as bucket\_5,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 6 THEN 1 END) as bucket\_6,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 7 THEN 1 END) as bucket\_7,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 8 THEN 1 END) as bucket\_8,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 9 THEN 1 END) as bucket\_9,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 10 THEN 1 END) as bucket\_10,  
-    \-- Grouped buckets  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 11 AND lifetime\_deposit\_count \<= 15 THEN 1 END) as bucket\_11\_15,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \>= 16 AND lifetime\_deposit\_count \<= 20 THEN 1 END) as bucket\_16\_20,  
-    COUNT(CASE WHEN lifetime\_deposit\_count \> 20 THEN 1 END) as bucket\_over\_20,  
-    \-- Total cohort size  
-    COUNT(\*) as total\_cohort  
-  FROM monthly\_cohorts  
-  GROUP BY cohort\_month  
+/* Step 2: Count deposits WITHIN the cohort month for each FTD */
+ftd_deposit_counts AS (
+  SELECT 
+    pfd.cohort_month,
+    pfd.player_id,
+    COUNT(*) as deposits_in_cohort_month
+  FROM player_first_deposit pfd
+  INNER JOIN transactions t ON pfd.player_id = t.player_id
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.balance_type = 'withdrawable'
+    AND t.status = 'completed'
+    AND DATE_TRUNC('month', t.created_at)::date = pfd.cohort_month
+    -- Apply same currency filter
+    [[ AND UPPER(COALESCE(
+           t.metadata->>'currency',
+           t.cash_currency,
+           (SELECT wallet_currency FROM players WHERE id = pfd.player_id),
+           (SELECT currency FROM companies WHERE id = (SELECT company_id FROM players WHERE id = pfd.player_id))
+         )) IN ({{currency_filter}}) ]]
+  GROUP BY pfd.cohort_month, pfd.player_id
+),
+
+/* Step 3: Calculate EXACT bucket distribution for each month */
+monthly_bucket_counts AS (
+  SELECT
+    cohort_month,
+    COUNT(CASE WHEN deposits_in_cohort_month = 1 THEN 1 END) as bucket_1,
+    COUNT(CASE WHEN deposits_in_cohort_month = 2 THEN 1 END) as bucket_2,
+    COUNT(CASE WHEN deposits_in_cohort_month = 3 THEN 1 END) as bucket_3,
+    COUNT(CASE WHEN deposits_in_cohort_month = 4 THEN 1 END) as bucket_4,
+    COUNT(CASE WHEN deposits_in_cohort_month = 5 THEN 1 END) as bucket_5,
+    COUNT(CASE WHEN deposits_in_cohort_month = 6 THEN 1 END) as bucket_6,
+    COUNT(CASE WHEN deposits_in_cohort_month >= 7 THEN 1 END) as bucket_7_plus,
+    COUNT(*) as total_cohort
+  FROM ftd_deposit_counts
+  GROUP BY cohort_month
+),
+
+/* Step 4: Calculate column totals */
+column_totals AS (
+  SELECT
+    NULL::date as cohort_month,
+    SUM(bucket_1) as bucket_1,
+    SUM(bucket_2) as bucket_2,
+    SUM(bucket_3) as bucket_3,
+    SUM(bucket_4) as bucket_4,
+    SUM(bucket_5) as bucket_5,
+    SUM(bucket_6) as bucket_6,
+    SUM(bucket_7_plus) as bucket_7_plus,
+    SUM(total_cohort) as total_cohort
+  FROM monthly_bucket_counts
+),
+
+/* Step 5: Union monthly data with totals row */
+all_rows AS (
+  SELECT 
+    cohort_month,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_cohort,
+    0 as sort_order
+  FROM monthly_bucket_counts
+  
+  UNION ALL
+  
+  SELECT 
+    cohort_month,
+    bucket_1,
+    bucket_2,
+    bucket_3,
+    bucket_4,
+    bucket_5,
+    bucket_6,
+    bucket_7_plus,
+    total_cohort,
+    1 as sort_order
+  FROM column_totals
 )
 
-/\* Final Output \- One row per month within selected date range \*/  
-SELECT   
-  TO\_CHAR(cohort\_month, 'FMMonth YYYY') as "FTD\_Month",  
-  bucket\_1 as "1 time",  
-  bucket\_2 as "2 times",  
-  bucket\_3 as "3 times",  
-  bucket\_4 as "4 times",  
-  bucket\_5 as "5 times",  
-  bucket\_6 as "6 times",  
-  bucket\_7 as "7 times",  
-  bucket\_8 as "8 times",  
-  bucket\_9 as "9 times",  
-  bucket\_10 as "10 times",  
-  bucket\_11\_15 as "11-15 times",  
-  bucket\_16\_20 as "16-20 times",  
-  bucket\_over\_20 as "\>20 times",  
-  total\_cohort as "Total\_FTD"  
-FROM monthly\_bucket\_counts  
-ORDER BY cohort\_month DESC;
+/* Final Output - Monthly data with totals row */
+SELECT 
+  CASE 
+    WHEN cohort_month IS NULL THEN 'TOTALS'
+    ELSE TO_CHAR(cohort_month, 'FMMonth YYYY')
+  END as "Month",
+  bucket_1 as "1 time",
+  bucket_2 as "2 times",
+  bucket_3 as "3 times",
+  bucket_4 as "4 times",
+  bucket_5 as "5 times",
+  bucket_6 as "6 times",
+  bucket_7_plus as "7+ times",
+  total_cohort as "Total"
+FROM all_rows
+ORDER BY CASE WHEN sort_order = 1 THEN 1 ELSE 0 END DESC, 
+         cohort_month DESC;
+
+ -------------
 
