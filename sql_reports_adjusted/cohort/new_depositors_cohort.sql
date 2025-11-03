@@ -104,33 +104,36 @@ filtered_players AS (
     [[ AND {{is_test_account}} ]]
 ),
 
-/* Step 1: Find first deposit date and identify FTD cohort month */
+/* Step 1: Find first deposit date and identify FTD cohort month (ALIGNED WITH DAILY/MONTHLY) */
+ftd_all_deposits AS (
+  SELECT
+    t.player_id,
+    t.created_at,
+    t.currency_type,
+    ROW_NUMBER() OVER (PARTITION BY t.player_id ORDER BY t.created_at ASC) as deposit_rank
+  FROM transactions t
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.status = 'completed'
+),
 player_first_deposit AS (
-  SELECT 
-    transactions.player_id,
-    MIN(transactions.created_at) as first_deposit_date,
-    DATE_TRUNC('month', MIN(transactions.created_at))::date AS cohort_month
-  FROM transactions
-  INNER JOIN filtered_players ON transactions.player_id = filtered_players.player_id
-  JOIN players ON players.id = transactions.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE transactions.transaction_category = 'deposit'
-    AND transactions.transaction_type = 'credit'
-    AND transactions.balance_type = 'withdrawable'
-    AND transactions.status = 'completed'
-    -- Currency filter using standard hierarchy
-    [[ AND UPPER(COALESCE(
-           transactions.metadata->>'currency',
-           transactions.cash_currency,
-           players.wallet_currency,
-           companies.currency
-         )) IN ({{currency_filter}}) ]]
-  GROUP BY transactions.player_id
+  SELECT
+    fad.player_id,
+    fad.created_at as first_deposit_date,
+    DATE_TRUNC('month', fad.created_at)::date AS cohort_month
+  FROM ftd_all_deposits fad
+  INNER JOIN filtered_players fp ON fad.player_id = fp.player_id
+  WHERE fad.deposit_rank = 1
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(fad.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
 ),
 
-/* Step 2: Count deposits WITHIN the cohort month for each FTD */
+/* Step 2: Count deposits WITHIN the cohort month for each FTD (ALIGNED WITH DAILY/MONTHLY) */
 ftd_deposit_counts AS (
-  SELECT 
+  SELECT
     pfd.cohort_month,
     pfd.player_id,
     COUNT(*) as deposits_in_cohort_month
@@ -141,13 +144,12 @@ ftd_deposit_counts AS (
     AND t.balance_type = 'withdrawable'
     AND t.status = 'completed'
     AND DATE_TRUNC('month', t.created_at)::date = pfd.cohort_month
-    -- Apply same currency filter
-    [[ AND UPPER(COALESCE(
-           t.metadata->>'currency',
-           t.cash_currency,
-           (SELECT wallet_currency FROM players WHERE id = pfd.player_id),
-           (SELECT currency FROM companies WHERE id = (SELECT company_id FROM players WHERE id = pfd.player_id))
-         )) IN ({{currency_filter}}) ]]
+    -- Apply same currency filter (ALIGNED WITH DAILY/MONTHLY)
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY pfd.cohort_month, pfd.player_id
 ),
 

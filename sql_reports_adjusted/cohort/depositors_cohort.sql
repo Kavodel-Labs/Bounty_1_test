@@ -76,31 +76,33 @@ END ]]
     [[ AND {{is_test_account}} ]]
 ),
 
-/* Step 1: Identify first deposits with currency filter */
-first_deposits AS (
-  SELECT 
+/* Step 1: Identify first deposits with currency filter (ALIGNED WITH DAILY/MONTHLY) */
+ftd_all_deposits AS (
+  SELECT
     t.player_id,
-    DATE_TRUNC('month', MIN(t.created_at)) as first_deposit_month,
-    MIN(t.created_at) as first_deposit_date
+    t.created_at,
+    t.currency_type,
+    ROW_NUMBER() OVER (PARTITION BY t.player_id ORDER BY t.created_at ASC) as deposit_rank
   FROM transactions t
-  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE t.transaction_category = 'deposit' 
-    AND t.transaction_type = 'credit' 
-    AND t.balance_type = 'withdrawable'
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
     AND t.status = 'completed'
-    -- Apply cohort date bounds
-    AND t.created_at >= (SELECT start_date FROM bounds)
-    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-    -- Currency filter using same resolution as daily/monthly
-    [[ AND UPPER(COALESCE(
-           t.metadata->>'currency',
-           t.cash_currency,
-           players.wallet_currency,
-           companies.currency
-         )) IN ({{currency_filter}}) ]]
-  GROUP BY t.player_id
+),
+first_deposits AS (
+  SELECT
+    fad.player_id,
+    DATE_TRUNC('month', fad.created_at) as first_deposit_month,
+    fad.created_at as first_deposit_date
+  FROM ftd_all_deposits fad
+  INNER JOIN filtered_players fp ON fad.player_id = fp.player_id
+  WHERE fad.deposit_rank = 1
+    AND fad.created_at >= (SELECT start_date FROM bounds)
+    AND fad.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(fad.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
 ),
 
 /* Step 2: Calculate cohort sizes */
@@ -112,28 +114,25 @@ cohort_sizes AS (
   GROUP BY first_deposit_month
 ),
 
-/* Step 3: Track deposit activity for each cohort */
+/* Step 3: Track deposit activity for each cohort (ALIGNED WITH DAILY/MONTHLY) */
 cohort_activity AS (
-  SELECT 
+  SELECT
     fd.first_deposit_month as cohort_month,
     DATE_TRUNC('month', t.created_at) as activity_month,
     COUNT(DISTINCT t.player_id) as active_depositors
   FROM first_deposits fd
   INNER JOIN transactions t ON fd.player_id = t.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE t.transaction_category = 'deposit' 
-    AND t.transaction_type = 'credit' 
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
     AND t.balance_type = 'withdrawable'
     AND t.status = 'completed'
     AND t.created_at >= fd.first_deposit_date
-    -- Apply same currency filter
-    [[ AND UPPER(COALESCE(
-           t.metadata->>'currency',
-           t.cash_currency,
-           players.wallet_currency,
-           companies.currency
-         )) IN ({{currency_filter}}) ]]
+    -- Apply same currency filter (ALIGNED WITH DAILY/MONTHLY)
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY fd.first_deposit_month, DATE_TRUNC('month', t.created_at)
 ),
 

@@ -113,29 +113,32 @@ filtered_players AS (
     [[ AND {{is_test_account}} ]]
 ),
 
-/* Step 2: Identify first deposit date for all filtered players --- */
+/* Step 2: Identify first deposit date for all filtered players (ALIGNED WITH DAILY/MONTHLY) --- */
+ftd_all_deposits AS (
+  SELECT
+    t.player_id,
+    t.created_at,
+    t.currency_type,
+    ROW_NUMBER() OVER (PARTITION BY t.player_id ORDER BY t.created_at ASC) as deposit_rank
+  FROM transactions t
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.status = 'completed'
+),
 player_first_deposit AS (
-  SELECT 
-    transactions.player_id,
-    MIN(transactions.created_at) as first_deposit_date
-  FROM transactions
-  INNER JOIN filtered_players fp ON transactions.player_id = fp.player_id
-  JOIN players ON players.id = transactions.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE transactions.transaction_category = 'deposit'
-    AND transactions.transaction_type = 'credit'
-    AND transactions.balance_type = 'withdrawable'
-    AND transactions.status = 'completed'
-    AND transactions.created_at >= (SELECT start_date FROM bounds)
-    AND transactions.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-    -- Currency filter using standard hierarchy
-    [[ AND UPPER(COALESCE(
-           transactions.metadata->>'currency',
-           transactions.cash_currency,
-           players.wallet_currency,
-           companies.currency
-         )) IN ({{currency_filter}}) ]]
-  GROUP BY transactions.player_id
+  SELECT
+    fad.player_id,
+    fad.created_at as first_deposit_date
+  FROM ftd_all_deposits fad
+  INNER JOIN filtered_players fp ON fad.player_id = fp.player_id
+  WHERE fad.deposit_rank = 1
+    AND fad.created_at >= (SELECT start_date FROM bounds)
+    AND fad.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(fad.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
 ),
 
 /* --- Step 3: Filter to EXISTING DEPOSITORS for each month --- */
@@ -151,28 +154,25 @@ existing_depositors_by_month AS (
   WHERE pfd.first_deposit_date < am.month_start
 ),
 
-/* --- Step 4: Count deposits per existing depositor per month with currency filter --- */
+/* --- Step 4: Count deposits per existing depositor per month with currency filter (ALIGNED WITH DAILY/MONTHLY) --- */
 monthly_deposit_counts AS (
-  SELECT 
+  SELECT
     edbm.month_start,
     edbm.player_id,
     COUNT(*) as deposits_in_month
   FROM existing_depositors_by_month edbm
   INNER JOIN transactions t ON edbm.player_id = t.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE t.transaction_category = 'deposit'
     AND t.transaction_type = 'credit'
     AND t.balance_type = 'withdrawable'
     AND t.status = 'completed'
     AND DATE_TRUNC('month', t.created_at)::date = edbm.month_start
-    -- Currency filter using standard hierarchy
-    [[ AND UPPER(COALESCE(
-           t.metadata->>'currency',
-           t.cash_currency,
-           players.wallet_currency,
-           companies.currency
-         )) IN ({{currency_filter}}) ]]
+    -- Currency filter (ALIGNED WITH DAILY/MONTHLY)
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY edbm.month_start, edbm.player_id
 ),
 

@@ -76,61 +76,61 @@ END ]]
     [[ AND {{is_test_account}} ]]
 ),
 
-/* Step 1: Identify first cash bets with currency filter */
-first_cash_bets AS (
-  SELECT 
+/* Step 1: Identify first cash bets with currency filter (ALIGNED WITH DAILY/MONTHLY) */
+fcb_all_bets AS (
+  SELECT
     t.player_id,
-    DATE_TRUNC('month', MIN(t.created_at)) as first_cash_bet_month,
-    MIN(t.created_at) as first_cash_bet_date
+    t.created_at,
+    t.currency_type,
+    ROW_NUMBER() OVER (PARTITION BY t.player_id ORDER BY t.created_at ASC) as bet_rank
   FROM transactions t
-  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE t.transaction_category = 'game_bet' 
-    AND t.transaction_type = 'debit' 
+  WHERE t.transaction_category = 'game_bet'
+    AND t.transaction_type = 'debit'
     AND t.balance_type = 'withdrawable'
     AND t.status = 'completed'
-    -- Apply cohort date bounds
-    AND t.created_at >= (SELECT start_date FROM bounds)
-    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-    -- Currency filter using same resolution as daily/monthly
-    [[ AND UPPER(COALESCE(
-           t.metadata->>'currency',
-           t.cash_currency,
-           players.wallet_currency,
-           companies.currency
-         )) IN ({{currency_filter}}) ]]
-  GROUP BY t.player_id
+),
+first_cash_bets AS (
+  SELECT
+    fab.player_id,
+    DATE_TRUNC('month', fab.created_at) as first_cash_bet_month,
+    fab.created_at as first_cash_bet_date
+  FROM fcb_all_bets fab
+  INNER JOIN filtered_players fp ON fab.player_id = fp.player_id
+  WHERE fab.bet_rank = 1
+    AND fab.created_at >= (SELECT start_date FROM bounds)
+    AND fab.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(fab.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
 ),
 
-/* Step 2: Calculate TOTAL BET AMOUNTS for each cohort across months */
+/* Step 2: Calculate TOTAL BET AMOUNTS for each cohort across months (ALIGNED WITH DAILY/MONTHLY) */
 cohort_bet_amounts AS (
-  SELECT 
+  SELECT
     fcb.first_cash_bet_month as cohort_month,
     DATE_TRUNC('month', t.created_at) as activity_month,
-    SUM(ABS(CASE 
-      WHEN {{currency_filter}} = 'EUR' 
+    SUM(ABS(CASE
+      WHEN {{currency_filter}} = 'EUR'
       THEN COALESCE(t.eur_amount, t.amount)
-      ELSE t.amount 
+      ELSE t.amount
     END)) as total_amount_wagered,
-    EXTRACT(YEAR FROM AGE(DATE_TRUNC('month', t.created_at), fcb.first_cash_bet_month)) * 12 + 
+    EXTRACT(YEAR FROM AGE(DATE_TRUNC('month', t.created_at), fcb.first_cash_bet_month)) * 12 +
     EXTRACT(MONTH FROM AGE(DATE_TRUNC('month', t.created_at), fcb.first_cash_bet_month)) as months_since_first_bet
   FROM first_cash_bets fcb
   INNER JOIN transactions t ON fcb.player_id = t.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE t.transaction_category = 'game_bet' 
-    AND t.transaction_type = 'debit' 
+  WHERE t.transaction_category = 'game_bet'
+    AND t.transaction_type = 'debit'
     AND t.balance_type = 'withdrawable'
     AND t.status = 'completed'
     AND t.created_at >= fcb.first_cash_bet_date
-    -- Apply same currency filter
-    [[ AND UPPER(COALESCE(
-           t.metadata->>'currency',
-           t.cash_currency,
-           players.wallet_currency,
-           companies.currency
-         )) IN ({{currency_filter}}) ]]
+    -- Apply same currency filter (ALIGNED WITH DAILY/MONTHLY)
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY fcb.first_cash_bet_month, DATE_TRUNC('month', t.created_at)
 ),
 

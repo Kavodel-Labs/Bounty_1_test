@@ -59,23 +59,37 @@ player_cohorts AS (
 
 /**
 ---------------------------------------------------------------------------
-STEP 4: FTD DATA - Identify first deposits per player
+STEP 4: FTD DATA - Identify first deposits per player (ALIGNED WITH DAILY/MONTHLY)
 ---------------------------------------------------------------------------
 */
-ftd_data AS (
-  SELECT t.player_id, MIN(t.created_at) AS first_deposit_ts
+ftd_all_deposits AS (
+  SELECT
+    t.player_id,
+    t.created_at,
+    t.currency_type,
+    ROW_NUMBER() OVER (PARTITION BY t.player_id ORDER BY t.created_at ASC) as deposit_rank
   FROM transactions t
-  INNER JOIN player_cohorts pc ON t.player_id = pc.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE t.transaction_category = 'deposit' AND t.transaction_type = 'credit' AND t.status = 'completed' AND t.balance_type = 'withdrawable'
-    [[ AND UPPER(COALESCE(t.metadata->>'currency', t.cash_currency, players.wallet_currency, companies.currency)) IN ({{currency_filter}}) ]]
-  GROUP BY t.player_id
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.status = 'completed'
+),
+ftd_data AS (
+  SELECT
+    fad.player_id,
+    fad.created_at AS first_deposit_ts
+  FROM ftd_all_deposits fad
+  INNER JOIN player_cohorts pc ON fad.player_id = pc.player_id
+  WHERE fad.deposit_rank = 1
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(fad.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
 ),
 
 /**
 ---------------------------------------------------------------------------
-STEP 5: DEPOSIT & WITHDRAWAL METRICS (WITH CURRENCY LOGIC)
+STEP 5: DEPOSIT & WITHDRAWAL METRICS (ALIGNED WITH DAILY/MONTHLY)
 ---------------------------------------------------------------------------
 */
 deposit_withdrawal_metrics AS (
@@ -86,10 +100,12 @@ deposit_withdrawal_metrics AS (
       THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS total_withdrawals
   FROM player_cohorts pc
   LEFT JOIN transactions t ON pc.player_id = t.player_id
-  JOIN players ON players.id = pc.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(t.metadata->>'currency', t.cash_currency, players.wallet_currency, companies.currency)) IN ({{currency_filter}}) ]]
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY pc.registration_month
 ),
 
@@ -106,10 +122,12 @@ ggr_metrics AS (
     COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'bonus' AND t.balance_type = 'non-withdrawable' AND t.status = 'completed' THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS promo_win
   FROM player_cohorts pc
   LEFT JOIN transactions t ON pc.player_id = t.player_id
-  JOIN players ON players.id = pc.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(t.metadata->>'currency', t.cash_currency, players.wallet_currency, companies.currency)) IN ({{currency_filter}}) ]]
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY pc.registration_month
 ),
 
@@ -124,10 +142,12 @@ bonus_cost_metrics AS (
       THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS total_bonus_cost
   FROM player_cohorts pc
   LEFT JOIN transactions t ON pc.player_id = t.player_id
-  JOIN players ON players.id = pc.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(t.metadata->>'currency', t.cash_currency, players.wallet_currency, companies.currency)) IN ({{currency_filter}}) ]]
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY pc.registration_month
 ),
 
