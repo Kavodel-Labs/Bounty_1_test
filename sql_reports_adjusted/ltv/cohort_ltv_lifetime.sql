@@ -178,7 +178,15 @@ cohort_lifetime_metrics AS (
 
 /**
 ---------------------------------------------------------------------------
-STEP 9: FINAL REPORT DATA - Calculate fees, NGR, Net Revenue, and LTV
+STEP 9: FINAL REPORT DATA - Calculate fees, NGR, and LTV (CTO-APPROVED)
+---------------------------------------------------------------------------
+FORMULAS:
+  Cash GGR = cash_bet - cash_win (verified from Daily KPIs line 445)
+  Provider Fee = Cash GGR * 0.09 (9%)
+  Payment Fee = (deposits + withdrawals) * 0.08 (8%)
+  Platform Fee = Cash GGR * 0.01 (1%)
+  NGR = Cash GGR - Provider Fee - Payment Fee - Platform Fee - Bonus Cost
+  LTV = NGR / FTD
 ---------------------------------------------------------------------------
 */
 final_report_data AS (
@@ -190,16 +198,16 @@ final_report_data AS (
     total_registrations AS REG,
     ftd_count AS FTD,
     ROUND(CASE WHEN total_registrations > 0 THEN ftd_count::numeric / total_registrations * 100 ELSE 0 END, 2) AS conversion_rate,
-    ROUND(CASE WHEN ftd_count > 0 THEN (((cash_bet + promo_bet - cash_win - promo_win) * 0.90) - ((total_deposits + total_withdrawals) * 0.08) - total_bonus_cost)::numeric / ftd_count ELSE 0 END, 2) AS ltv,
     ROUND(total_deposits, 2) AS deposit,
     ROUND(total_withdrawals, 2) AS wd,
     ROUND(cash_bet + promo_bet - cash_win - promo_win, 2) AS ggr,
-    ROUND((cash_bet + promo_bet - cash_win - promo_win) * 0.09, 2) AS provider_fee,
+    ROUND(cash_bet - cash_win, 2) AS cash_ggr,
+    ROUND((cash_bet - cash_win) * 0.09, 2) AS provider_fee,
     ROUND((total_deposits + total_withdrawals) * 0.08, 2) AS payment_fee,
-    ROUND((cash_bet + promo_bet - cash_win - promo_win) * 0.01, 2) AS platform_fee,
+    ROUND((cash_bet - cash_win) * 0.01, 2) AS platform_fee,
     ROUND(total_bonus_cost, 2) AS bonus_cost,
-    ROUND((cash_bet + promo_bet - cash_win - promo_win) - ((cash_bet + promo_bet - cash_win - promo_win) * 0.09) - ((total_deposits + total_withdrawals) * 0.08) - ((cash_bet + promo_bet - cash_win - promo_win) * 0.01), 2) AS ngr,
-    ROUND(((cash_bet + promo_bet - cash_win - promo_win) - ((cash_bet + promo_bet - cash_win - promo_win) * 0.09) - ((total_deposits + total_withdrawals) * 0.08) - ((cash_bet + promo_bet - cash_win - promo_win) * 0.01)) - total_bonus_cost, 2) AS net_revenue
+    ROUND((cash_bet - cash_win) - ((cash_bet - cash_win) * 0.09) - ((total_deposits + total_withdrawals) * 0.08) - ((cash_bet - cash_win) * 0.01) - total_bonus_cost, 2) AS ngr,
+    ROUND(CASE WHEN ftd_count > 0 THEN ((cash_bet - cash_win) - ((cash_bet - cash_win) * 0.09) - ((total_deposits + total_withdrawals) * 0.08) - ((cash_bet - cash_win) * 0.01) - total_bonus_cost)::numeric / ftd_count ELSE 0 END, 2) AS ltv
   FROM cohort_lifetime_metrics
 )
 
@@ -208,23 +216,23 @@ final_report_data AS (
 FINAL OUTPUT - Combine TOTAL row with individual month rows
 ---------------------------------------------------------------------------
 */
-SELECT 
+SELECT
   -1 AS sort_order,
   NULL::date as registration_month, -- Add NULL date for consistent column structure
   'TOTAL' AS month_year,
   SUM(REG) AS REG,
   SUM(FTD) AS FTD,
   ROUND(SUM(FTD)::numeric / NULLIF(SUM(REG), 0) * 100, 2) AS conversion_rate,
-  ROUND(SUM(net_revenue)::numeric / NULLIF(SUM(FTD), 0), 2) AS ltv,
   ROUND(SUM(deposit), 2) AS deposit,
   ROUND(SUM(wd), 2) AS wd,
   ROUND(SUM(ggr), 2) AS ggr,
+  ROUND(SUM(cash_ggr), 2) AS cash_ggr,
   ROUND(SUM(provider_fee), 2) AS provider_fee,
   ROUND(SUM(payment_fee), 2) AS payment_fee,
   ROUND(SUM(platform_fee), 2) AS platform_fee,
   ROUND(SUM(bonus_cost), 2) AS bonus_cost,
   ROUND(SUM(ngr), 2) AS ngr,
-  ROUND(SUM(net_revenue), 2) AS net_revenue
+  ROUND(SUM(ngr)::numeric / NULLIF(SUM(FTD), 0), 2) AS ltv
 FROM final_report_data
 
 UNION ALL
@@ -236,16 +244,16 @@ SELECT
   REG,
   FTD,
   conversion_rate,
-  ltv,
   deposit,
   wd,
   ggr,
+  cash_ggr,
   provider_fee,
   payment_fee,
   platform_fee,
   bonus_cost,
   ngr,
-  net_revenue
+  ltv
 FROM final_report_data
 
 
