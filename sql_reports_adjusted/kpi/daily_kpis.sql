@@ -1,5 +1,6 @@
 /* =========================
    DAILY KPIs — MULTI-DAY with SUMMARY ROW
+   [NEW] FTD discovery uses ROW_NUMBER() for accurate first deposits
    [NEW] Implements standardized EUR currency conversion with NULL safety
    ========================= */
 
@@ -94,30 +95,7 @@ filtered_players AS (
     [[ AND {{is_test_account}} ]]
 ),
 
-/* ---------- GLOBAL FTD ---------- */
-ftd_first AS (
-  SELECT
-    t.player_id,
-    MIN(t.created_at) AS first_deposit_ts
-  FROM transactions t
-  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE t.transaction_category = 'deposit'
-    AND t.transaction_type = 'credit'
-    AND t.status = 'completed'
-    AND t.balance_type = 'withdrawable'
-    AND t.created_at >= (SELECT start_date FROM bounds)
-    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-    [[ AND UPPER(COALESCE(
-      t.metadata->>'currency',
-      t.cash_currency,
-      players.wallet_currency,
-      companies.currency
-    )) IN ({{currency_filter}}) ]]
-  GROUP BY t.player_id
-),
-
+/* ---------- REGISTRATION SNAPSHOT ---------- */
 player_reg AS (
   SELECT
     p.id AS player_id,
@@ -141,6 +119,34 @@ registrations AS (
   GROUP BY ds.report_date
 ),
 
+/* ---------- GLOBAL FTD (TRUE FIRST DEPOSIT EVER) ---------- */
+ftd_all_deposits AS (
+  SELECT 
+    t.player_id,
+    t.created_at,
+    t.currency_type,
+    ROW_NUMBER() OVER (PARTITION BY t.player_id ORDER BY t.created_at ASC) as deposit_rank
+  FROM transactions t
+  WHERE t.transaction_category = 'deposit'
+    AND t.transaction_type = 'credit'
+    AND t.status = 'completed'
+),
+ftd_first AS (
+  SELECT
+    fad.player_id,
+    fad.created_at AS first_deposit_ts
+  FROM ftd_all_deposits fad
+  INNER JOIN filtered_players fp ON fad.player_id = fp.player_id
+  WHERE fad.deposit_rank = 1
+    AND fad.created_at >= (SELECT start_date FROM bounds)
+    AND fad.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+    [[ AND CASE 
+      WHEN {{currency_filter}} != 'EUR' 
+      THEN UPPER(fad.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
+),
+
 ftds AS (
   SELECT
     DATE_TRUNC('day', ff.first_deposit_ts)::date AS report_date,
@@ -155,8 +161,8 @@ ftd_metrics AS (
   SELECT
     ds.report_date,
     COUNT(DISTINCT f.player_id) AS ftds_count,
-    COUNT(*) FILTER (WHERE DATE_TRUNC('month', f.registration_ts) = DATE_TRUNC('month', f.first_deposit_ts)) AS new_ftds,
-    COUNT(*) FILTER (WHERE DATE_TRUNC('month', f.registration_ts) < DATE_TRUNC('month', f.first_deposit_ts)) AS old_ftds,
+    COUNT(*) FILTER (WHERE f.registration_ts >= (SELECT start_date FROM bounds)) AS new_ftds,
+    COUNT(*) FILTER (WHERE f.registration_ts < (SELECT start_date FROM bounds)) AS old_ftds,
     COUNT(*) FILTER (WHERE DATE_TRUNC('day', f.registration_ts) = DATE_TRUNC('day', f.first_deposit_ts)) AS d0_ftds,
     COUNT(*) FILTER (WHERE DATE_TRUNC('day', f.registration_ts) <> DATE_TRUNC('day', f.first_deposit_ts)) AS late_ftds
   FROM date_series ds
@@ -187,7 +193,7 @@ deposit_metrics AS (
        AND t.balance_type='withdrawable'
       THEN CASE 
         WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)  -- NULL-safe EUR conversion
+        THEN COALESCE(t.eur_amount, 0)  -- NULL-safe EUR conversion
         ELSE t.amount 
       END 
     END), 0) AS deposits_amount
@@ -196,15 +202,12 @@ deposit_metrics AS (
     ON t.created_at >= ds.start_ts
     AND t.created_at < ds.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(
-      t.metadata->>'currency',
-      t.cash_currency,
-      players.wallet_currency,
-      companies.currency
-    )) IN ({{currency_filter}}) ]]
+    [[ AND CASE 
+      WHEN {{currency_filter}} != 'EUR' 
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY ds.report_date
 ),
 
@@ -247,15 +250,12 @@ withdrawal_metrics AS (
     ON t.created_at >= ds.start_ts
     AND t.created_at < ds.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(
-      t.metadata->>'currency',
-      t.cash_currency,
-      players.wallet_currency,
-      companies.currency
-    )) IN ({{currency_filter}}) ]]
+    [[ AND CASE 
+      WHEN {{currency_filter}} != 'EUR' 
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY ds.report_date
 ),
 
@@ -270,15 +270,12 @@ active_players AS (
     ON t.created_at >= ds.start_ts
     AND t.created_at < ds.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(
-      t.metadata->>'currency',
-      t.cash_currency,
-      players.wallet_currency,
-      companies.currency
-    )) IN ({{currency_filter}}) ]]
+    [[ AND CASE 
+      WHEN {{currency_filter}} != 'EUR' 
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY ds.report_date
 ),
 
@@ -335,15 +332,12 @@ betting_metrics AS (
     ON t.created_at >= ds.start_ts
     AND t.created_at < ds.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(
-      t.metadata->>'currency',
-      t.cash_currency,
-      players.wallet_currency,
-      companies.currency
-    )) IN ({{currency_filter}}) ]]
+    [[ AND CASE 
+      WHEN {{currency_filter}} != 'EUR' 
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY ds.report_date
 ),
 
@@ -367,15 +361,12 @@ bonus_converted AS (
     ON t.created_at >= ds.start_ts
     AND t.created_at < ds.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(
-      t.metadata->>'currency',
-      t.cash_currency,
-      players.wallet_currency,
-      companies.currency
-    )) IN ({{currency_filter}}) ]]
+    [[ AND CASE 
+      WHEN {{currency_filter}} != 'EUR' 
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY ds.report_date
 ),
 
@@ -398,15 +389,12 @@ bonus_cost AS (
     ON t.created_at >= ds.start_ts
     AND t.created_at < ds.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
   WHERE 1=1
-    [[ AND UPPER(COALESCE(
-      t.metadata->>'currency',
-      t.cash_currency,
-      players.wallet_currency,
-      companies.currency
-    )) IN ({{currency_filter}}) ]]
+    [[ AND CASE 
+      WHEN {{currency_filter}} != 'EUR' 
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
   GROUP BY ds.report_date
 ),
 
@@ -529,20 +517,17 @@ SELECT
   (SELECT COUNT(DISTINCT t.player_id)
    FROM transactions t
    INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-   JOIN players ON players.id = t.player_id
-   JOIN companies ON companies.id = players.company_id
    WHERE t.transaction_category='deposit'
      AND t.transaction_type='credit'
      AND t.status='completed'
      AND t.balance_type='withdrawable'
      AND t.created_at >= (SELECT start_date FROM bounds)
      AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-     [[ AND UPPER(COALESCE(
-            t.metadata->>'currency',
-            t.cash_currency,
-            players.wallet_currency,
-            companies.currency
-          )) IN ({{currency_filter}}) ]]
+     [[ AND CASE 
+       WHEN {{currency_filter}} != 'EUR' 
+       THEN UPPER(t.currency_type) IN ({{currency_filter}})
+       ELSE TRUE
+     END ]]
   ) AS "Unique Depositors",
   
   SUM("#Deposits") AS "#Deposits",
@@ -558,35 +543,29 @@ SELECT
   (SELECT COUNT(DISTINCT t.player_id)
    FROM transactions t
    INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-   JOIN players ON players.id = t.player_id
-   JOIN companies ON companies.id = players.company_id
    WHERE t.transaction_category='game_bet'
      AND t.created_at >= (SELECT start_date FROM bounds)
      AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-     [[ AND UPPER(COALESCE(
-            t.metadata->>'currency',
-            t.cash_currency,
-            players.wallet_currency,
-            companies.currency
-          )) IN ({{currency_filter}}) ]]
+     [[ AND CASE 
+       WHEN {{currency_filter}} != 'EUR' 
+       THEN UPPER(t.currency_type) IN ({{currency_filter}})
+       ELSE TRUE
+     END ]]
   ) AS "Active Players",
   
   -- Real active players for entire period
   (SELECT COUNT(DISTINCT t.player_id)
    FROM transactions t
    INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-   JOIN players ON players.id = t.player_id
-   JOIN companies ON companies.id = players.company_id
    WHERE t.transaction_category='game_bet'
      AND t.balance_type='withdrawable'
      AND t.created_at >= (SELECT start_date FROM bounds)
      AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-     [[ AND UPPER(COALESCE(
-            t.metadata->>'currency',
-            t.cash_currency,
-            players.wallet_currency,
-            companies.currency
-          )) IN ({{currency_filter}}) ]]
+     [[ AND CASE 
+       WHEN {{currency_filter}} != 'EUR' 
+       THEN UPPER(t.currency_type) IN ({{currency_filter}})
+       ELSE TRUE
+     END ]]
   ) AS "Real Active Players",
   
   ROUND(SUM("Cash Bet"), 2) AS "Cash Bet",
@@ -616,4 +595,3 @@ UNION ALL
 SELECT * FROM daily_data
 
 ORDER BY sort_order, "Date" DESC;
-----------------------------------------
