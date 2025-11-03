@@ -1,6 +1,6 @@
 /* =========================
    MONTHLY KPIs — MULTI-MONTH VIEW with COMPLETE SUMMARY ROW
-   [NEW] Implements standardized EUR currency conversion with NULL safety
+   FTD discovery uses players.first_purchase_date (not transactions)
    ========================= */
 
 WITH
@@ -20,6 +20,7 @@ bounds_raw AS (
 ),
 bounds AS (
   SELECT 
+    /* clamp end to the last day of the end month */
     DATE_TRUNC('month', end_date_raw) + INTERVAL '1 month' - INTERVAL '1 day' AS end_date,
     CASE 
       WHEN start_date_raw IS NULL THEN DATE_TRUNC('month', end_date_raw - INTERVAL '12 months')
@@ -31,11 +32,11 @@ bounds AS (
 month_series AS (
   SELECT 
     DATE_TRUNC('month', d)::date AS report_month,
-    DATE_TRUNC('month', d) AS start_ts,
+    DATE_TRUNC('month', d)       AS start_ts,
     LEAST(DATE_TRUNC('month', d) + INTERVAL '1 month', NOW()) AS end_ts
   FROM generate_series(
     (SELECT start_date FROM bounds),
-    (SELECT end_date FROM bounds),
+    (SELECT end_date   FROM bounds),
     INTERVAL '1 month'
   ) AS d
 ),
@@ -90,30 +91,7 @@ filtered_players AS (
     [[ AND {{is_test_account}} ]]
 ),
 
-/* ---------- FTD METRICS ---------- */
-ftd_first AS (
-  SELECT
-    t.player_id,
-    MIN(t.created_at) AS first_deposit_ts
-  FROM transactions t
-  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
-  WHERE t.transaction_category = 'deposit'
-    AND t.transaction_type = 'credit'
-    AND t.status = 'completed'
-    AND t.balance_type = 'withdrawable'
-    AND t.created_at >= (SELECT start_date FROM bounds)
-    AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-    [[ AND UPPER(COALESCE(
-      t.metadata->>'currency',
-      t.cash_currency,
-      players.wallet_currency,
-      companies.currency
-    )) IN ({{currency_filter}}) ]]
-  GROUP BY t.player_id
-),
-
+/* ---------- REGISTRATIONS SNAPSHOT ---------- */
 player_reg AS (
   SELECT
     p.id AS player_id,
@@ -133,8 +111,20 @@ registrations AS (
   FROM month_series ms
   LEFT JOIN player_reg pr
     ON pr.registration_ts >= ms.start_ts
-    AND pr.registration_ts < ms.end_ts
+   AND pr.registration_ts <  ms.end_ts
   GROUP BY ms.report_month
+),
+
+/* ---------- FTD via players.first_purchase_date ---------- */
+ftd_first AS (
+  SELECT
+    p.id AS player_id,
+    p.first_purchase_date::timestamp AS first_deposit_ts
+  FROM players p
+  INNER JOIN filtered_players fp ON p.id = fp.player_id
+  WHERE p.first_purchase_date IS NOT NULL
+    AND p.first_purchase_date >= (SELECT start_date FROM bounds)
+    AND p.first_purchase_date <  (SELECT end_date   FROM bounds) + INTERVAL '1 day'
 ),
 
 ftds AS (
@@ -153,8 +143,8 @@ ftd_metrics AS (
     COUNT(DISTINCT f.player_id) AS ftds_count,
     COUNT(*) FILTER (WHERE DATE_TRUNC('month', f.registration_ts) = DATE_TRUNC('month', f.first_deposit_ts)) AS new_ftds,
     COUNT(*) FILTER (WHERE DATE_TRUNC('month', f.registration_ts) < DATE_TRUNC('month', f.first_deposit_ts)) AS old_ftds,
-    COUNT(*) FILTER (WHERE DATE_TRUNC('day', f.registration_ts) = DATE_TRUNC('day', f.first_deposit_ts)) AS d0_ftds,
-    COUNT(*) FILTER (WHERE DATE_TRUNC('day', f.registration_ts) <> DATE_TRUNC('day', f.first_deposit_ts)) AS late_ftds
+    COUNT(*) FILTER (WHERE DATE_TRUNC('day',   f.registration_ts) = DATE_TRUNC('day',   f.first_deposit_ts)) AS d0_ftds,
+    COUNT(*) FILTER (WHERE DATE_TRUNC('day',   f.registration_ts) <> DATE_TRUNC('day',  f.first_deposit_ts)) AS late_ftds
   FROM month_series ms
   LEFT JOIN ftds f ON f.report_month = ms.report_month
   GROUP BY ms.report_month
@@ -190,10 +180,10 @@ deposit_metrics AS (
   FROM month_series ms
   LEFT JOIN transactions t
     ON t.created_at >= ms.start_ts
-    AND t.created_at < ms.end_ts
+   AND t.created_at <  ms.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
-  JOIN companies ON companies.id = players.company_id
+  JOIN players   ON players.id     = t.player_id
+  JOIN companies ON companies.id   = players.company_id
   WHERE 1=1
     [[ AND UPPER(COALESCE(
       t.metadata->>'currency',
@@ -216,8 +206,7 @@ withdrawal_metrics AS (
     ) AS withdrawals_count,
     COALESCE(SUM(ABS(
       CASE 
-        WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
         ELSE t.amount 
       END
     )) FILTER (
@@ -228,8 +217,7 @@ withdrawal_metrics AS (
     ), 0) AS withdrawals_amount,
     COALESCE(SUM(ABS(
       CASE 
-        WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
         ELSE t.amount 
       END
     )) FILTER (
@@ -241,9 +229,9 @@ withdrawal_metrics AS (
   FROM month_series ms
   LEFT JOIN transactions t
     ON t.created_at >= ms.start_ts
-    AND t.created_at < ms.end_ts
+   AND t.created_at <  ms.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
+  JOIN players   ON players.id   = t.player_id
   JOIN companies ON companies.id = players.company_id
   WHERE 1=1
     [[ AND UPPER(COALESCE(
@@ -259,21 +247,14 @@ withdrawal_metrics AS (
 active_players AS (
   SELECT
     ms.report_month,
-    COUNT(DISTINCT CASE 
-      WHEN t.transaction_category='game_bet' 
-      THEN t.player_id 
-    END) AS active_players_count,
-    COUNT(DISTINCT CASE 
-      WHEN t.transaction_category='game_bet' 
-       AND t.balance_type='withdrawable' 
-      THEN t.player_id 
-    END) AS real_active_players
+    COUNT(DISTINCT CASE WHEN t.transaction_category='game_bet' THEN t.player_id END) AS active_players_count,
+    COUNT(DISTINCT CASE WHEN t.transaction_category='game_bet' AND t.balance_type='withdrawable' THEN t.player_id END) AS real_active_players
   FROM month_series ms
   LEFT JOIN transactions t
     ON t.created_at >= ms.start_ts
-    AND t.created_at < ms.end_ts
+   AND t.created_at <  ms.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
+  JOIN players   ON players.id   = t.player_id
   JOIN companies ON companies.id = players.company_id
   WHERE 1=1
     [[ AND UPPER(COALESCE(
@@ -295,8 +276,7 @@ betting_metrics AS (
        AND t.balance_type='withdrawable'
        AND t.status='completed'
       THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
         ELSE t.amount 
       END
     END), 0) AS cash_bet,
@@ -306,8 +286,7 @@ betting_metrics AS (
        AND t.balance_type='withdrawable'
        AND t.status='completed'
       THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
         ELSE t.amount 
       END
     END), 0) AS cash_win,
@@ -317,8 +296,7 @@ betting_metrics AS (
        AND t.balance_type='non-withdrawable'
        AND t.status='completed'
       THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
         ELSE t.amount 
       END
     END), 0) AS promo_bet,
@@ -328,17 +306,16 @@ betting_metrics AS (
        AND t.balance_type='non-withdrawable'
        AND t.transaction_category = 'bonus'
       THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
         ELSE t.amount 
       END
     END), 0) AS promo_win
   FROM month_series ms
   LEFT JOIN transactions t
     ON t.created_at >= ms.start_ts
-    AND t.created_at < ms.end_ts
+   AND t.created_at <  ms.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
+  JOIN players   ON players.id   = t.player_id
   JOIN companies ON companies.id = players.company_id
   WHERE 1=1
     [[ AND UPPER(COALESCE(
@@ -360,17 +337,16 @@ bonus_converted AS (
        AND t.status='completed'
        AND t.balance_type='withdrawable'
       THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
         ELSE t.amount 
       END
     END), 0) AS bonus_converted_amount
   FROM month_series ms
   LEFT JOIN transactions t
     ON t.created_at >= ms.start_ts
-    AND t.created_at < ms.end_ts
+   AND t.created_at <  ms.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
+  JOIN players   ON players.id   = t.player_id
   JOIN companies ON companies.id = players.company_id
   WHERE 1=1
     [[ AND UPPER(COALESCE(
@@ -391,17 +367,16 @@ bonus_cost AS (
        AND t.status='completed'
        AND t.balance_type='withdrawable'
       THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
-        THEN COALESCE(t.eur_amount, t.amount)
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
         ELSE t.amount 
       END
     END), 0) AS total_bonus_cost
   FROM month_series ms
   LEFT JOIN transactions t
     ON t.created_at >= ms.start_ts
-    AND t.created_at < ms.end_ts
+   AND t.created_at <  ms.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
-  JOIN players ON players.id = t.player_id
+  JOIN players   ON players.id   = t.player_id
   JOIN companies ON companies.id = players.company_id
   WHERE 1=1
     [[ AND UPPER(COALESCE(
@@ -417,7 +392,7 @@ bonus_cost AS (
 monthly_data AS (
   SELECT 
     0 as sort_order,
-    TO_CHAR(ms.report_month, 'YYYY-MM') AS "Month",
+    TO_CHAR(ms.report_month, 'FMMonth YYYY') AS "Month",
     COALESCE(r.total_registrations, 0) AS "#Registrations",
     COALESCE(fm.ftds_count, 0) AS "#FTDs",
     COALESCE(fm.new_ftds, 0) AS "#New FTDs",
@@ -475,14 +450,14 @@ monthly_data AS (
              (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0) - COALESCE(bet.cash_win,0) - COALESCE(bet.promo_win,0)) * 100 
         ELSE 0 END, 2) AS "%CashFlow to GGR"
   FROM month_series ms
-  LEFT JOIN registrations r ON r.report_month = ms.report_month
-  LEFT JOIN ftd_metrics fm ON fm.report_month = ms.report_month
-  LEFT JOIN deposit_metrics dm ON dm.report_month = ms.report_month
+  LEFT JOIN registrations   r   ON r.report_month   = ms.report_month
+  LEFT JOIN ftd_metrics     fm  ON fm.report_month  = ms.report_month
+  LEFT JOIN deposit_metrics dm  ON dm.report_month  = ms.report_month
   LEFT JOIN withdrawal_metrics wm ON wm.report_month = ms.report_month
-  LEFT JOIN active_players ap ON ap.report_month = ms.report_month
-  LEFT JOIN betting_metrics bet ON bet.report_month = ms.report_month
-  LEFT JOIN bonus_converted bc ON bc.report_month = ms.report_month
-  LEFT JOIN bonus_cost bcost ON bcost.report_month = ms.report_month
+  LEFT JOIN active_players  ap  ON ap.report_month  = ms.report_month
+  LEFT JOIN betting_metrics bet  ON bet.report_month = ms.report_month
+  LEFT JOIN bonus_converted bc  ON bc.report_month  = ms.report_month
+  LEFT JOIN bonus_cost      bcost ON bcost.report_month = ms.report_month
 )
 
 /* ========== FINAL OUTPUT WITH COMPLETE SUMMARY ROW ========== */
@@ -504,7 +479,7 @@ SELECT
   ROUND(CASE WHEN SUM("#Registrations") > 0 
              THEN SUM("#FTDs")::numeric / SUM("#Registrations") * 100 ELSE 0 END, 2) AS "%Conversion total reg", 
   
-  -- Complete registration conversion for entire period
+  -- Complete registration conversion for entire period (window-level)
   (SELECT ROUND(
     CASE WHEN COUNT(CASE WHEN pr.email_verified = TRUE THEN 1 END) > 0 
          THEN COUNT(DISTINCT CASE WHEN ff.first_deposit_ts IS NOT NULL THEN ff.player_id END)::numeric / 
@@ -513,21 +488,21 @@ SELECT
    FROM player_reg pr 
    LEFT JOIN ftd_first ff ON pr.player_id = ff.player_id 
    WHERE pr.registration_ts >= (SELECT start_date FROM bounds) 
-     AND pr.registration_ts < (SELECT end_date FROM bounds) + INTERVAL '1 day'
+     AND pr.registration_ts <  (SELECT end_date   FROM bounds) + INTERVAL '1 day'
   ) AS "%Conversion complete reg", 
   
   -- Unique depositors for entire period
   (SELECT COUNT(DISTINCT t.player_id) 
    FROM transactions t 
    INNER JOIN filtered_players fp ON t.player_id = fp.player_id 
-   JOIN players ON players.id = t.player_id 
+   JOIN players   ON players.id   = t.player_id 
    JOIN companies ON companies.id = players.company_id 
    WHERE t.transaction_category='deposit' 
      AND t.transaction_type='credit' 
      AND t.status='completed' 
      AND t.balance_type='withdrawable' 
      AND t.created_at >= (SELECT start_date FROM bounds) 
-     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day' 
+     AND t.created_at <  (SELECT end_date   FROM bounds) + INTERVAL '1 day' 
      [[ AND UPPER(COALESCE(
             t.metadata->>'currency',
             t.cash_currency,
@@ -549,11 +524,11 @@ SELECT
   (SELECT COUNT(DISTINCT t.player_id) 
    FROM transactions t 
    INNER JOIN filtered_players fp ON t.player_id = fp.player_id 
-   JOIN players ON players.id = t.player_id 
+   JOIN players   ON players.id   = t.player_id 
    JOIN companies ON companies.id = players.company_id 
    WHERE t.transaction_category='game_bet' 
      AND t.created_at >= (SELECT start_date FROM bounds) 
-     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day' 
+     AND t.created_at <  (SELECT end_date   FROM bounds) + INTERVAL '1 day' 
      [[ AND UPPER(COALESCE(
             t.metadata->>'currency',
             t.cash_currency,
@@ -566,12 +541,12 @@ SELECT
   (SELECT COUNT(DISTINCT t.player_id) 
    FROM transactions t 
    INNER JOIN filtered_players fp ON t.player_id = fp.player_id 
-   JOIN players ON players.id = t.player_id 
+   JOIN players   ON players.id   = t.player_id 
    JOIN companies ON companies.id = players.company_id 
    WHERE t.transaction_category='game_bet' 
      AND t.balance_type='withdrawable' 
      AND t.created_at >= (SELECT start_date FROM bounds) 
-     AND t.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day' 
+     AND t.created_at <  (SELECT end_date   FROM bounds) + INTERVAL '1 day' 
      [[ AND UPPER(COALESCE(
             t.metadata->>'currency',
             t.cash_currency,
@@ -607,4 +582,3 @@ UNION ALL
 SELECT * FROM monthly_data
 
 ORDER BY sort_order, "Month" DESC;
-
