@@ -18,104 +18,104 @@ WITH temporal_calculations AS (
     EXTRACT(day FROM CURRENT_DATE) as days_elapsed_mtd,
     EXTRACT(day FROM DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day') as total_days_month,
 
-    -- YESTERDAY VALUES
+    -- YESTERDAY VALUES (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('day', created_at) = CURRENT_DATE - INTERVAL '1 day'
       AND transaction_category = 'deposit' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as deposits_yesterday,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as deposits_yesterday,
 
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('day', created_at) = CURRENT_DATE - INTERVAL '1 day'
       AND transaction_category = 'withdrawal' AND transaction_type = 'debit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as withdrawals_yesterday,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as withdrawals_yesterday,
 
-    -- CASH BETS (WITHDRAWABLE ONLY) - YESTERDAY
+    -- CASH BETS (WITHDRAWABLE ONLY) - YESTERDAY (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('day', created_at) = CURRENT_DATE - INTERVAL '1 day'
       AND transaction_category = 'game_bet' AND transaction_type = 'debit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as cash_bets_yesterday,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as cash_bets_yesterday,
 
-    -- CASH WINS (WITHDRAWABLE ONLY) - YESTERDAY
+    -- CASH WINS (WITHDRAWABLE ONLY) - YESTERDAY (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('day', created_at) = CURRENT_DATE - INTERVAL '1 day'
       AND transaction_category = 'game_bet' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as cash_wins_yesterday,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as cash_wins_yesterday,
 
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('day', created_at) = CURRENT_DATE - INTERVAL '1 day'
       AND transaction_category = 'bonus_completion' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as bonus_cost_yesterday,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as bonus_cost_yesterday,
 
-    -- MTD VALUES
+    -- MTD VALUES (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)
       AND transaction_category = 'deposit' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as deposits_mtd,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as deposits_mtd,
 
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)
       AND transaction_category = 'withdrawal' AND transaction_type = 'debit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as withdrawals_mtd,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as withdrawals_mtd,
 
-    -- CASH BETS (WITHDRAWABLE ONLY) - MTD
+    -- CASH BETS (WITHDRAWABLE ONLY) - MTD (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)
       AND transaction_category = 'game_bet' AND transaction_type = 'debit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as cash_bets_mtd,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as cash_bets_mtd,
 
-    -- CASH WINS (WITHDRAWABLE ONLY) - MTD
+    -- CASH WINS (WITHDRAWABLE ONLY) - MTD (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)
       AND transaction_category = 'game_bet' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as cash_wins_mtd,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as cash_wins_mtd,
 
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)
       AND transaction_category = 'bonus_completion' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as bonus_cost_mtd,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as bonus_cost_mtd,
 
-    -- PREVIOUS MONTH VALUES
+    -- PREVIOUS MONTH VALUES (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
       AND transaction_category = 'deposit' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as deposits_prev_month,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as deposits_prev_month,
 
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
       AND transaction_category = 'withdrawal' AND transaction_type = 'debit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as withdrawals_prev_month,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as withdrawals_prev_month,
 
-    -- CASH BETS (WITHDRAWABLE ONLY) - PREVIOUS MONTH
+    -- CASH BETS (WITHDRAWABLE ONLY) - PREVIOUS MONTH (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
       AND transaction_category = 'game_bet' AND transaction_type = 'debit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as cash_bets_prev_month,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as cash_bets_prev_month,
 
-    -- CASH WINS (WITHDRAWABLE ONLY) - PREVIOUS MONTH
+    -- CASH WINS (WITHDRAWABLE ONLY) - PREVIOUS MONTH (EUR CONVERSION)
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
       AND transaction_category = 'game_bet' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as cash_wins_prev_month,
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as cash_wins_prev_month,
 
     COALESCE(SUM(CASE
       WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
       AND transaction_category = 'bonus_completion' AND transaction_type = 'credit'
       AND status = 'completed' AND balance_type = 'withdrawable'
-      THEN amount ELSE 0 END), 0) as bonus_cost_prev_month
+      THEN COALESCE(eur_amount, amount) ELSE 0 END), 0) as bonus_cost_prev_month
 
   FROM transactions
 ),
