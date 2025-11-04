@@ -214,7 +214,11 @@ FROM (
     CONCAT('€', ROUND(deposits_mtd, 0)) as mtd_value,
     CONCAT('€', deposits_estimation) as estimation_value,
     CONCAT('€', ROUND(deposits_prev_month, 0)) as actual_prev_month,
-    CONCAT(ROUND(((deposits_estimation - deposits_prev_month) / NULLIF(deposits_prev_month, 0)) * 100, 1), '%') as percentage_difference
+    CASE
+      WHEN ((deposits_estimation - deposits_prev_month) / NULLIF(deposits_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((deposits_estimation - deposits_prev_month) / NULLIF(deposits_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((deposits_estimation - deposits_prev_month) / NULLIF(deposits_prev_month, 0)) * 100, 1), '%')
+    END as percentage_difference
   FROM ngr_estimations
 
   UNION ALL
@@ -224,7 +228,11 @@ FROM (
     CONCAT('€', ROUND(withdrawals_mtd, 0)),
     CONCAT('€', withdrawals_estimation),
     CONCAT('€', ROUND(withdrawals_prev_month, 0)),
-    CONCAT(ROUND(((withdrawals_estimation - withdrawals_prev_month) / NULLIF(withdrawals_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN ((withdrawals_estimation - withdrawals_prev_month) / NULLIF(withdrawals_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((withdrawals_estimation - withdrawals_prev_month) / NULLIF(withdrawals_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((withdrawals_estimation - withdrawals_prev_month) / NULLIF(withdrawals_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
@@ -234,7 +242,11 @@ FROM (
     CONCAT('€', ROUND(cashflow_mtd, 0)),
     CONCAT('€', ROUND((deposits_estimation - withdrawals_estimation), 0)),
     CONCAT('€', ROUND(cashflow_prev_month, 0)),
-    CONCAT(ROUND((((deposits_estimation - withdrawals_estimation) - cashflow_prev_month) / NULLIF(cashflow_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN (((deposits_estimation - withdrawals_estimation) - cashflow_prev_month) / NULLIF(cashflow_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND((((deposits_estimation - withdrawals_estimation) - cashflow_prev_month) / NULLIF(cashflow_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND((((deposits_estimation - withdrawals_estimation) - cashflow_prev_month) / NULLIF(cashflow_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
@@ -244,7 +256,11 @@ FROM (
     CONCAT('€', ROUND(cash_bets_mtd, 0)),
     CONCAT('€', cash_bets_estimation),
     CONCAT('€', ROUND(cash_bets_prev_month, 0)),
-    CONCAT(ROUND(((cash_bets_estimation - cash_bets_prev_month) / NULLIF(cash_bets_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN ((cash_bets_estimation - cash_bets_prev_month) / NULLIF(cash_bets_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((cash_bets_estimation - cash_bets_prev_month) / NULLIF(cash_bets_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((cash_bets_estimation - cash_bets_prev_month) / NULLIF(cash_bets_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
@@ -254,7 +270,11 @@ FROM (
     CONCAT('€', ROUND(cash_ggr_mtd, 0)),
     CONCAT('€', cash_ggr_estimation),
     CONCAT('€', ROUND(cash_ggr_prev_month, 0)),
-    CONCAT(ROUND(((cash_ggr_estimation - cash_ggr_prev_month) / NULLIF(cash_ggr_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN ((cash_ggr_estimation - cash_ggr_prev_month) / NULLIF(cash_ggr_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((cash_ggr_estimation - cash_ggr_prev_month) / NULLIF(cash_ggr_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((cash_ggr_estimation - cash_ggr_prev_month) / NULLIF(cash_ggr_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
@@ -264,7 +284,11 @@ FROM (
     CONCAT('€', ROUND(provider_fee_mtd, 0)),
     CONCAT('€', ROUND(provider_fee_estimation, 0)),
     CONCAT('€', ROUND(provider_fee_prev_month, 0)),
-    CONCAT(ROUND(((provider_fee_estimation - provider_fee_prev_month) / NULLIF(provider_fee_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN ((provider_fee_estimation - provider_fee_prev_month) / NULLIF(provider_fee_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((provider_fee_estimation - provider_fee_prev_month) / NULLIF(provider_fee_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((provider_fee_estimation - provider_fee_prev_month) / NULLIF(provider_fee_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
@@ -274,7 +298,11 @@ FROM (
     CONCAT('€', ROUND(payment_fee_mtd, 0)),
     CONCAT('€', ROUND(payment_fee_estimation, 0)),
     CONCAT('€', ROUND(payment_fee_prev_month, 0)),
-    CONCAT(ROUND(((payment_fee_estimation - payment_fee_prev_month) / NULLIF(payment_fee_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN ((payment_fee_estimation - payment_fee_prev_month) / NULLIF(payment_fee_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((payment_fee_estimation - payment_fee_prev_month) / NULLIF(payment_fee_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((payment_fee_estimation - payment_fee_prev_month) / NULLIF(payment_fee_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
@@ -284,7 +312,11 @@ FROM (
     CONCAT('€', ROUND(platform_fee_mtd, 0)),
     CONCAT('€', ROUND(platform_fee_estimation, 0)),
     CONCAT('€', ROUND(platform_fee_prev_month, 0)),
-    CONCAT(ROUND(((platform_fee_estimation - platform_fee_prev_month) / NULLIF(platform_fee_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN ((platform_fee_estimation - platform_fee_prev_month) / NULLIF(platform_fee_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((platform_fee_estimation - platform_fee_prev_month) / NULLIF(platform_fee_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((platform_fee_estimation - platform_fee_prev_month) / NULLIF(platform_fee_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
@@ -294,7 +326,11 @@ FROM (
     CONCAT('€', ROUND(bonus_cost_mtd, 0)),
     CONCAT('€', bonus_cost_estimation),
     CONCAT('€', ROUND(bonus_cost_prev_month, 0)),
-    CONCAT(ROUND(((bonus_cost_estimation - bonus_cost_prev_month) / NULLIF(bonus_cost_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN ((bonus_cost_estimation - bonus_cost_prev_month) / NULLIF(bonus_cost_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((bonus_cost_estimation - bonus_cost_prev_month) / NULLIF(bonus_cost_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((bonus_cost_estimation - bonus_cost_prev_month) / NULLIF(bonus_cost_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
@@ -304,7 +340,11 @@ FROM (
     CONCAT('€', ROUND(ngr_mtd, 0)),
     CONCAT('€', ROUND(ngr_estimation, 0)),
     CONCAT('€', ROUND(ngr_prev_month, 0)),
-    CONCAT(ROUND(((ngr_estimation - ngr_prev_month) / NULLIF(ngr_prev_month, 0)) * 100, 1), '%')
+    CASE
+      WHEN ((ngr_estimation - ngr_prev_month) / NULLIF(ngr_prev_month, 0)) * 100 > 0
+      THEN CONCAT('+', ROUND(((ngr_estimation - ngr_prev_month) / NULLIF(ngr_prev_month, 0)) * 100, 1), '%')
+      ELSE CONCAT(ROUND(((ngr_estimation - ngr_prev_month) / NULLIF(ngr_prev_month, 0)) * 100, 1), '%')
+    END
   FROM ngr_estimations
 
   UNION ALL
