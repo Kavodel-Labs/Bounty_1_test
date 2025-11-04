@@ -1,7 +1,8 @@
 -- ===================================================
--- DAILY EMAIL REPORT - V5 (CTO-APPROVED)
+-- DAILY EMAIL REPORT - V6 (CTO-APPROVED with Dynamic Date Headers)
 -- ===================================================
 -- Purpose: Aligned with STAKEHOLDER GUIDE V2 formulas
+-- Note: First row contains dynamic date headers for column clarity
 -- Cash GGR = Cash Bets - Cash Wins (withdrawable balance only)
 -- Provider Fee = Cash GGR × 0.09 (9%)
 -- Payment Fee = (Deposits + Withdrawals) × 0.08 (8%)
@@ -189,7 +190,7 @@ ngr_estimations AS (
   FROM final_calculations
 )
 
--- FINAL OUTPUT: Daily Report Table Format
+-- FINAL OUTPUT: Daily Report Table Format with Dynamic Date Header Row
 SELECT
   metric_name,
   yesterday_value,
@@ -198,7 +199,19 @@ SELECT
   actual_prev_month,
   percentage_difference
 FROM (
-  SELECT 1 as sort_order, 'DEPOSITS' as metric_name,
+  -- HEADER ROW with dynamic dates
+  SELECT 0 as sort_order, 'DATE PERIOD →' as metric_name,
+    'yesterday_' || TO_CHAR(CURRENT_DATE - INTERVAL '1 day', 'DD-MM-YY') as yesterday_value,
+    'mtd_' || UPPER(TO_CHAR(CURRENT_DATE, 'MON-YY')) as mtd_value,
+    'estimation_' || UPPER(TO_CHAR(CURRENT_DATE, 'MON-YY')) as estimation_value,
+    'actual_' || UPPER(TO_CHAR(CURRENT_DATE - INTERVAL '1 month', 'MON-YY')) as actual_prev_month,
+    '% vs prev' as percentage_difference
+  FROM ngr_estimations
+  LIMIT 1
+
+  UNION ALL
+
+  SELECT 1, 'DEPOSITS' as metric_name,
     CONCAT('€', ROUND(deposits_yesterday, 0)) as yesterday_value,
     CONCAT('€', ROUND(deposits_mtd, 0)) as mtd_value,
     CONCAT('€', deposits_estimation) as estimation_value,
