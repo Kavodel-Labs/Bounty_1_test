@@ -206,8 +206,6 @@ FROM (
     'estimation_' || UPPER(TO_CHAR(CURRENT_DATE, 'MON-YY')) as estimation_value,
     'actual_' || UPPER(TO_CHAR(CURRENT_DATE - INTERVAL '1 month', 'MON-YY')) as actual_prev_month,
     '% vs prev' as percentage_difference
-  FROM ngr_estimations
-  LIMIT 1
 
   UNION ALL
 
