@@ -205,15 +205,15 @@ FROM (
     'mtd_' || UPPER(TO_CHAR(CURRENT_DATE, 'MON-YY')) as mtd_value,
     'estimation_' || UPPER(TO_CHAR(CURRENT_DATE, 'MON-YY')) as estimation_value,
     'actual_' || UPPER(TO_CHAR(CURRENT_DATE - INTERVAL '1 month', 'MON-YY')) as actual_prev_month,
-    '% vs prev' as percentage_difference
+    '% vs ' || UPPER(TO_CHAR(CURRENT_DATE - INTERVAL '1 month', 'MON-YY')) as percentage_difference
 
   UNION ALL
 
   SELECT 1, 'DEPOSITS' as metric_name,
-    CONCAT('€', ROUND(deposits_yesterday, 0)) as yesterday_value,
-    CONCAT('€', ROUND(deposits_mtd, 0)) as mtd_value,
-    CONCAT('€', deposits_estimation) as estimation_value,
-    CONCAT('€', ROUND(deposits_prev_month, 0)) as actual_prev_month,
+    CONCAT('€', TO_CHAR(ROUND(deposits_yesterday, 0), 'FM999,999,999')) as yesterday_value,
+    CONCAT('€', TO_CHAR(ROUND(deposits_mtd, 0), 'FM999,999,999')) as mtd_value,
+    CONCAT('€', TO_CHAR(deposits_estimation, 'FM999,999,999')) as estimation_value,
+    CONCAT('€', TO_CHAR(ROUND(deposits_prev_month, 0), 'FM999,999,999')) as actual_prev_month,
     CASE
       WHEN ((deposits_estimation - deposits_prev_month) / NULLIF(deposits_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((deposits_estimation - deposits_prev_month) / NULLIF(deposits_prev_month, 0)) * 100, 1), '%')
@@ -224,10 +224,10 @@ FROM (
   UNION ALL
 
   SELECT 2, 'PAID WITHDRAWALS',
-    CONCAT('€', ROUND(withdrawals_yesterday, 0)),
-    CONCAT('€', ROUND(withdrawals_mtd, 0)),
-    CONCAT('€', withdrawals_estimation),
-    CONCAT('€', ROUND(withdrawals_prev_month, 0)),
+    CONCAT('€', TO_CHAR(ROUND(withdrawals_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(withdrawals_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(withdrawals_estimation, 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(withdrawals_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN ((withdrawals_estimation - withdrawals_prev_month) / NULLIF(withdrawals_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((withdrawals_estimation - withdrawals_prev_month) / NULLIF(withdrawals_prev_month, 0)) * 100, 1), '%')
@@ -238,10 +238,10 @@ FROM (
   UNION ALL
 
   SELECT 3, 'CASHFLOW',
-    CONCAT('€', ROUND(cashflow_yesterday, 0)),
-    CONCAT('€', ROUND(cashflow_mtd, 0)),
-    CONCAT('€', ROUND((deposits_estimation - withdrawals_estimation), 0)),
-    CONCAT('€', ROUND(cashflow_prev_month, 0)),
+    CONCAT('€', TO_CHAR(ROUND(cashflow_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(cashflow_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND((deposits_estimation - withdrawals_estimation), 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(cashflow_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN (((deposits_estimation - withdrawals_estimation) - cashflow_prev_month) / NULLIF(cashflow_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND((((deposits_estimation - withdrawals_estimation) - cashflow_prev_month) / NULLIF(cashflow_prev_month, 0)) * 100, 1), '%')
@@ -252,10 +252,10 @@ FROM (
   UNION ALL
 
   SELECT 4, 'CASH TURNOVER',
-    CONCAT('€', ROUND(cash_bets_yesterday, 0)),
-    CONCAT('€', ROUND(cash_bets_mtd, 0)),
-    CONCAT('€', cash_bets_estimation),
-    CONCAT('€', ROUND(cash_bets_prev_month, 0)),
+    CONCAT('€', TO_CHAR(ROUND(cash_bets_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(cash_bets_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(cash_bets_estimation, 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(cash_bets_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN ((cash_bets_estimation - cash_bets_prev_month) / NULLIF(cash_bets_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((cash_bets_estimation - cash_bets_prev_month) / NULLIF(cash_bets_prev_month, 0)) * 100, 1), '%')
@@ -266,10 +266,10 @@ FROM (
   UNION ALL
 
   SELECT 5, 'CASH GGR',
-    CONCAT('€', ROUND(cash_ggr_yesterday, 0)),
-    CONCAT('€', ROUND(cash_ggr_mtd, 0)),
-    CONCAT('€', cash_ggr_estimation),
-    CONCAT('€', ROUND(cash_ggr_prev_month, 0)),
+    CONCAT('€', TO_CHAR(ROUND(cash_ggr_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(cash_ggr_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(cash_ggr_estimation, 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(cash_ggr_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN ((cash_ggr_estimation - cash_ggr_prev_month) / NULLIF(cash_ggr_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((cash_ggr_estimation - cash_ggr_prev_month) / NULLIF(cash_ggr_prev_month, 0)) * 100, 1), '%')
@@ -279,11 +279,11 @@ FROM (
 
   UNION ALL
 
-  SELECT 6, 'PROVIDER FEE (9%)',
-    CONCAT('€', ROUND(provider_fee_yesterday, 0)),
-    CONCAT('€', ROUND(provider_fee_mtd, 0)),
-    CONCAT('€', ROUND(provider_fee_estimation, 0)),
-    CONCAT('€', ROUND(provider_fee_prev_month, 0)),
+  SELECT 6, 'PROVIDER FEE',
+    CONCAT('€', TO_CHAR(ROUND(provider_fee_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(provider_fee_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(provider_fee_estimation, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(provider_fee_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN ((provider_fee_estimation - provider_fee_prev_month) / NULLIF(provider_fee_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((provider_fee_estimation - provider_fee_prev_month) / NULLIF(provider_fee_prev_month, 0)) * 100, 1), '%')
@@ -293,11 +293,11 @@ FROM (
 
   UNION ALL
 
-  SELECT 7, 'PAYMENT FEE (8%)',
-    CONCAT('€', ROUND(payment_fee_yesterday, 0)),
-    CONCAT('€', ROUND(payment_fee_mtd, 0)),
-    CONCAT('€', ROUND(payment_fee_estimation, 0)),
-    CONCAT('€', ROUND(payment_fee_prev_month, 0)),
+  SELECT 7, 'PAYMENT FEE',
+    CONCAT('€', TO_CHAR(ROUND(payment_fee_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(payment_fee_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(payment_fee_estimation, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(payment_fee_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN ((payment_fee_estimation - payment_fee_prev_month) / NULLIF(payment_fee_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((payment_fee_estimation - payment_fee_prev_month) / NULLIF(payment_fee_prev_month, 0)) * 100, 1), '%')
@@ -307,11 +307,11 @@ FROM (
 
   UNION ALL
 
-  SELECT 8, 'PLATFORM FEE (1%)',
-    CONCAT('€', ROUND(platform_fee_yesterday, 0)),
-    CONCAT('€', ROUND(platform_fee_mtd, 0)),
-    CONCAT('€', ROUND(platform_fee_estimation, 0)),
-    CONCAT('€', ROUND(platform_fee_prev_month, 0)),
+  SELECT 8, 'PLATFORM FEE',
+    CONCAT('€', TO_CHAR(ROUND(platform_fee_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(platform_fee_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(platform_fee_estimation, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(platform_fee_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN ((platform_fee_estimation - platform_fee_prev_month) / NULLIF(platform_fee_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((platform_fee_estimation - platform_fee_prev_month) / NULLIF(platform_fee_prev_month, 0)) * 100, 1), '%')
@@ -322,10 +322,10 @@ FROM (
   UNION ALL
 
   SELECT 9, 'BONUS COST',
-    CONCAT('€', ROUND(bonus_cost_yesterday, 0)),
-    CONCAT('€', ROUND(bonus_cost_mtd, 0)),
-    CONCAT('€', bonus_cost_estimation),
-    CONCAT('€', ROUND(bonus_cost_prev_month, 0)),
+    CONCAT('€', TO_CHAR(ROUND(bonus_cost_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(bonus_cost_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(bonus_cost_estimation, 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(bonus_cost_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN ((bonus_cost_estimation - bonus_cost_prev_month) / NULLIF(bonus_cost_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((bonus_cost_estimation - bonus_cost_prev_month) / NULLIF(bonus_cost_prev_month, 0)) * 100, 1), '%')
@@ -336,10 +336,10 @@ FROM (
   UNION ALL
 
   SELECT 10, 'NGR',
-    CONCAT('€', ROUND(ngr_yesterday, 0)),
-    CONCAT('€', ROUND(ngr_mtd, 0)),
-    CONCAT('€', ROUND(ngr_estimation, 0)),
-    CONCAT('€', ROUND(ngr_prev_month, 0)),
+    CONCAT('€', TO_CHAR(ROUND(ngr_yesterday, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(ngr_mtd, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(ngr_estimation, 0), 'FM999,999,999')),
+    CONCAT('€', TO_CHAR(ROUND(ngr_prev_month, 0), 'FM999,999,999')),
     CASE
       WHEN ((ngr_estimation - ngr_prev_month) / NULLIF(ngr_prev_month, 0)) * 100 > 0
       THEN CONCAT('+', ROUND(((ngr_estimation - ngr_prev_month) / NULLIF(ngr_prev_month, 0)) * 100, 1), '%')
