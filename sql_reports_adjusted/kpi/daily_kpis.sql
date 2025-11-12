@@ -305,26 +305,28 @@ betting_metrics AS (
         ELSE t.amount 
       END
     END), 0) AS cash_win,
+    /* PROMO BET - Updated to use external_transaction_id per CTO requirements */
     COALESCE(SUM(CASE
       WHEN t.transaction_type='debit'
        AND t.transaction_category='bonus'
-       AND t.balance_type='non-withdrawable'
        AND t.status='completed'
-      THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
+       AND t.external_transaction_id IS NOT NULL
+      THEN CASE
+        WHEN {{currency_filter}} = 'EUR'
         THEN COALESCE(t.eur_amount, t.amount)
-        ELSE t.amount 
+        ELSE t.amount
       END
     END), 0) AS promo_bet,
+    /* PROMO WIN - Updated to use external_transaction_id per CTO requirements */
     COALESCE(SUM(CASE
       WHEN t.transaction_type='credit'
+       AND t.transaction_category='bonus'
        AND t.status='completed'
-       AND t.balance_type='non-withdrawable'
-       AND t.transaction_category = 'bonus'
-      THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
+       AND t.external_transaction_id IS NOT NULL
+      THEN CASE
+        WHEN {{currency_filter}} = 'EUR'
         THEN COALESCE(t.eur_amount, t.amount)
-        ELSE t.amount 
+        ELSE t.amount
       END
     END), 0) AS promo_win
   FROM date_series ds
@@ -378,10 +380,10 @@ bonus_cost AS (
        AND t.balance_type='withdrawable'
        AND t.status='completed'
        AND t.transaction_category='bonus_completion'
-      THEN CASE 
-        WHEN {{currency_filter}} = 'EUR' 
+      THEN CASE
+        WHEN {{currency_filter}} = 'EUR'
         THEN COALESCE(t.eur_amount, t.amount)
-        ELSE t.amount 
+        ELSE t.amount
       END
     END), 0) AS total_bonus_cost
   FROM date_series ds
@@ -390,8 +392,71 @@ bonus_cost AS (
     AND t.created_at < ds.end_ts
   INNER JOIN filtered_players fp ON t.player_id = fp.player_id
   WHERE 1=1
-    [[ AND CASE 
-      WHEN {{currency_filter}} != 'EUR' 
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
+      THEN UPPER(t.currency_type) IN ({{currency_filter}})
+      ELSE TRUE
+    END ]]
+  GROUP BY ds.report_date
+),
+
+/* ---------- GRANTED BONUS (NEW COLUMN) ---------- */
+granted_bonus AS (
+  SELECT
+    ds.report_date,
+    COALESCE(SUM(CASE
+      -- Regular bonus credits
+      WHEN t.transaction_category = 'bonus'
+       AND t.transaction_type = 'credit'
+       AND t.status = 'completed'
+       AND t.balance_type = 'non-withdrawable'
+      THEN CASE
+        WHEN {{currency_filter}} = 'EUR'
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END
+
+      -- Free spin bonus
+      WHEN t.transaction_category = 'free_spin_bonus'
+       AND t.transaction_type = 'credit'
+       AND t.status = 'completed'
+       AND t.balance_type = 'non-withdrawable'
+      THEN CASE
+        WHEN {{currency_filter}} = 'EUR'
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END
+
+      -- Free bet wins
+      WHEN t.transaction_category IN ('free_bet', 'free_bet_win', 'freebet_win')
+       AND t.transaction_type = 'credit'
+       AND t.status = 'completed'
+       AND t.balance_type = 'non-withdrawable'
+      THEN CASE
+        WHEN {{currency_filter}} = 'EUR'
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END
+
+      -- Bonus completion (non-withdrawable portion)
+      WHEN t.transaction_category = 'bonus_completion'
+       AND t.transaction_type = 'credit'
+       AND t.status = 'completed'
+       AND t.balance_type = 'non-withdrawable'
+      THEN CASE
+        WHEN {{currency_filter}} = 'EUR'
+        THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END
+    END), 0) AS granted_bonus_amount
+  FROM date_series ds
+  LEFT JOIN transactions t
+    ON t.created_at >= ds.start_ts
+    AND t.created_at < ds.end_ts
+  INNER JOIN filtered_players fp ON t.player_id = fp.player_id
+  WHERE 1=1
+    [[ AND CASE
+      WHEN {{currency_filter}} != 'EUR'
       THEN UPPER(t.currency_type) IN ({{currency_filter}})
       ELSE TRUE
     END ]]
@@ -446,6 +511,7 @@ daily_data AS (
     ROUND(COALESCE(bet.cash_bet,0) - COALESCE(bet.cash_win,0), 2) AS "Cash GGR Casino",
     ROUND(COALESCE(bc.bonus_converted_amount, 0), 2) AS "Bonus Converted (Gross)",
     ROUND(COALESCE(bcost.total_bonus_cost, 0), 2) AS "Bonus Cost",
+    ROUND(COALESCE(gb.granted_bonus_amount, 0), 2) AS "Granted Bonus",
     ROUND(CASE 
         WHEN (COALESCE(bet.cash_bet,0) + COALESCE(bet.promo_bet,0)
              - COALESCE(bet.cash_win,0)
@@ -480,6 +546,7 @@ daily_data AS (
   LEFT JOIN betting_metrics bet ON bet.report_date = ds.report_date
   LEFT JOIN bonus_converted bc ON bc.report_date = ds.report_date
   LEFT JOIN bonus_cost bcost ON bcost.report_date = ds.report_date
+  LEFT JOIN granted_bonus gb ON gb.report_date = ds.report_date
 )
 
 /* ========== FINAL OUTPUT WITH TOTAL ROW ========== */
@@ -580,6 +647,7 @@ SELECT
   ROUND(SUM("Cash GGR Casino"), 2) AS "Cash GGR Casino",
   ROUND(SUM("Bonus Converted (Gross)"), 2) AS "Bonus Converted (Gross)",
   ROUND(SUM("Bonus Cost"), 2) AS "Bonus Cost",
+  ROUND(SUM("Granted Bonus"), 2) AS "Granted Bonus",
   ROUND(CASE WHEN SUM("GGR") > 0 
              THEN SUM("Bonus Cost") / SUM("GGR") * 100 ELSE 0 END, 2) AS "Bonus Ratio (GGR)",
   ROUND(CASE WHEN SUM("Deposits Amount") > 0 
