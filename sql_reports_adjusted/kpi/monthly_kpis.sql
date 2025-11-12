@@ -398,16 +398,17 @@ bonus_cost AS (
   GROUP BY ms.report_month
 ),
 
-/* ---------- GRANTED BONUS (NEW COLUMN) ---------- */
+/* ---------- GRANTED BONUS (NEW COLUMN) - Matches bonus_report_dashboard logic ---------- */
 granted_bonus AS (
   SELECT
     ms.report_month,
     COALESCE(SUM(CASE
-      -- Regular bonus credits
+      -- Regular bonus credits (only those associated with player_bonus campaigns)
       WHEN t.transaction_category = 'bonus'
        AND t.transaction_type = 'credit'
        AND t.status = 'completed'
        AND t.balance_type = 'non-withdrawable'
+       AND t.player_bonus_id IS NOT NULL
       THEN CASE
         WHEN {{currency_filter}} = 'EUR'
         THEN COALESCE(t.eur_amount, t.amount)
@@ -419,6 +420,7 @@ granted_bonus AS (
        AND t.transaction_type = 'credit'
        AND t.status = 'completed'
        AND t.balance_type = 'non-withdrawable'
+       AND t.player_bonus_id IS NOT NULL
       THEN CASE
         WHEN {{currency_filter}} = 'EUR'
         THEN COALESCE(t.eur_amount, t.amount)
@@ -430,6 +432,7 @@ granted_bonus AS (
        AND t.transaction_type = 'credit'
        AND t.status = 'completed'
        AND t.balance_type = 'non-withdrawable'
+       AND t.player_bonus_id IS NOT NULL
       THEN CASE
         WHEN {{currency_filter}} = 'EUR'
         THEN COALESCE(t.eur_amount, t.amount)
@@ -441,6 +444,7 @@ granted_bonus AS (
        AND t.transaction_type = 'credit'
        AND t.status = 'completed'
        AND t.balance_type = 'non-withdrawable'
+       AND t.player_bonus_id IS NOT NULL
       THEN CASE
         WHEN {{currency_filter}} = 'EUR'
         THEN COALESCE(t.eur_amount, t.amount)
