@@ -1,11 +1,11 @@
 -- ===================================================
--- DAILY EMAIL REPORT - V8 (Streamlined Metrics)
+-- DAILY EMAIL REPORT - V9 (Streamlined Metrics)
 -- ===================================================
 -- Purpose: Aligned with daily_kpis.sql calculations
--- Added: Registrations, FTDs, Promo Bet/Win, Turnover Casino, Granted Bonus
+-- Added: Registrations, FTDs, Promo Bet/Win, Granted Bonus
 -- Updated: Promo Bet/Win use external_transaction_id IS NOT NULL (CTO-approved)
 -- Updated: Granted Bonus uses player_bonus_id IS NOT NULL
--- Removed from output: Cash GGR Casino, GGR Casino, Platform Fee (Platform Fee still used in NGR calculation)
+-- Removed from output: Cash GGR Casino, GGR Casino, Turnover Casino, Platform Fee (Platform Fee still used in NGR calculation)
 -- NGR = Cash GGR - Platform Fee - Bonus Cost
 -- Hold% = Cash GGR / Cash Turnover × 100
 -- Updated: November 2025
@@ -412,8 +412,8 @@ FROM (
 
   UNION ALL
 
-  -- 7. TURNOVER CASINO
-  SELECT 7, 'TURNOVER CASINO',
+  -- 7. TOTAL TURNOVER
+  SELECT 7, 'TOTAL TURNOVER',
     CONCAT('€', TO_CHAR(ROUND(turnover_casino_yesterday, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(ROUND(turnover_casino_mtd, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(turnover_casino_estimation, 'FM999,999,999')),
@@ -427,23 +427,8 @@ FROM (
 
   UNION ALL
 
-  -- 8. TOTAL TURNOVER
-  SELECT 8, 'TOTAL TURNOVER',
-    CONCAT('€', TO_CHAR(ROUND(turnover_casino_yesterday, 0), 'FM999,999,999')),
-    CONCAT('€', TO_CHAR(ROUND(turnover_casino_mtd, 0), 'FM999,999,999')),
-    CONCAT('€', TO_CHAR(turnover_casino_estimation, 'FM999,999,999')),
-    CONCAT('€', TO_CHAR(ROUND(turnover_casino_prev_month, 0), 'FM999,999,999')),
-    CASE
-      WHEN ((turnover_casino_estimation - turnover_casino_prev_month) / NULLIF(turnover_casino_prev_month, 0)) * 100 > 0
-      THEN CONCAT('+', ROUND(((turnover_casino_estimation - turnover_casino_prev_month) / NULLIF(turnover_casino_prev_month, 0)) * 100, 1), '%')
-      ELSE CONCAT(ROUND(((turnover_casino_estimation - turnover_casino_prev_month) / NULLIF(turnover_casino_prev_month, 0)) * 100, 1), '%')
-    END
-  FROM ngr_calculations
-
-  UNION ALL
-
-  -- 9. CASH GGR
-  SELECT 9, 'CASH GGR',
+  -- 8. CASH GGR
+  SELECT 8, 'CASH GGR',
     CONCAT('€', TO_CHAR(ROUND(cash_ggr_yesterday, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(ROUND(cash_ggr_mtd, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(cash_ggr_estimation, 'FM999,999,999')),
@@ -457,8 +442,8 @@ FROM (
 
   UNION ALL
 
-  -- 10. BONUS COST
-  SELECT 10, 'BONUS COST',
+  -- 9. BONUS COST
+  SELECT 9, 'BONUS COST',
     CONCAT('€', TO_CHAR(ROUND(bonus_cost_yesterday, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(ROUND(bonus_cost_mtd, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(bonus_cost_estimation, 'FM999,999,999')),
@@ -472,8 +457,8 @@ FROM (
 
   UNION ALL
 
-  -- 11. GRANTED BONUS
-  SELECT 11, 'GRANTED BONUS',
+  -- 10. GRANTED BONUS
+  SELECT 10, 'GRANTED BONUS',
     CONCAT('€', TO_CHAR(ROUND(granted_bonus_yesterday, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(ROUND(granted_bonus_mtd, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(granted_bonus_estimation, 'FM999,999,999')),
@@ -487,8 +472,8 @@ FROM (
 
   UNION ALL
 
-  -- 12. NGR
-  SELECT 12, 'NGR',
+  -- 11. NGR
+  SELECT 11, 'NGR',
     CONCAT('€', TO_CHAR(ROUND(ngr_yesterday, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(ROUND(ngr_mtd, 0), 'FM999,999,999')),
     CONCAT('€', TO_CHAR(ROUND(ngr_estimation, 0), 'FM999,999,999')),
@@ -502,8 +487,8 @@ FROM (
 
   UNION ALL
 
-  -- 13. HOLD % (CASH)
-  SELECT 13, 'HOLD % (CASH)',
+  -- 12. HOLD % (CASH)
+  SELECT 12, 'HOLD % (CASH)',
     CASE WHEN cash_bets_yesterday > 0
          THEN CONCAT(ROUND((cash_ggr_yesterday / cash_bets_yesterday) * 100, 1), '%')
          ELSE '0.0%' END,
