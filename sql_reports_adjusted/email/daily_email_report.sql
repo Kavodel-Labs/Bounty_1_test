@@ -1,12 +1,13 @@
 -- ===================================================
--- DAILY EMAIL REPORT - V9 (Streamlined Metrics)
+-- DAILY EMAIL REPORT - V10 (NGR Aligned with LTV)
 -- ===================================================
--- Purpose: Aligned with daily_kpis.sql calculations
+-- Purpose: Aligned with daily_kpis.sql and LTV report calculations
 -- Added: Registrations, FTDs, Promo Bet/Win, Granted Bonus
 -- Updated: Promo Bet/Win use external_transaction_id IS NOT NULL (CTO-approved)
 -- Updated: Granted Bonus uses player_bonus_id IS NOT NULL
--- Removed from output: Cash GGR Casino, GGR Casino, Turnover Casino, Platform Fee (Platform Fee still used in NGR calculation)
--- NGR = Cash GGR - Platform Fee - Bonus Cost
+-- Updated: NGR now matches LTV formula with all fees
+-- Removed from output: Cash GGR Casino, GGR Casino, Turnover Casino, Platform Fee (fees calculated internally)
+-- NGR = Cash GGR - Provider Fee (9%) - Payment Fee (8%) - Platform Fee (1%) - Bonus Cost
 -- Hold% = Cash GGR / Cash Turnover × 100
 -- Updated: November 2025
 -- Currency: EUR
@@ -283,7 +284,19 @@ final_calculations AS (
     (cash_bets_estimation - cash_wins_estimation) as cash_ggr_estimation,
     (cash_bets_estimation + promo_bets_estimation) as turnover_casino_estimation,
 
-    -- PLATFORM FEE (1% of Cash GGR) - kept for NGR calculation
+    -- PROVIDER FEE (9% of Cash GGR) - aligned with LTV report
+    ROUND((cash_bets_yesterday - cash_wins_yesterday) * 0.09, 2) as provider_fee_yesterday,
+    ROUND((cash_bets_mtd - cash_wins_mtd) * 0.09, 2) as provider_fee_mtd,
+    ROUND((cash_bets_prev_month - cash_wins_prev_month) * 0.09, 2) as provider_fee_prev_month,
+    ROUND(((cash_bets_mtd / NULLIF(days_elapsed_mtd, 0)) * total_days_month - (cash_wins_mtd / NULLIF(days_elapsed_mtd, 0)) * total_days_month) * 0.09, 2) as provider_fee_estimation,
+
+    -- PAYMENT FEE (8% of Deposits + Withdrawals) - aligned with LTV report
+    ROUND((deposits_yesterday + withdrawals_yesterday) * 0.08, 2) as payment_fee_yesterday,
+    ROUND((deposits_mtd + withdrawals_mtd) * 0.08, 2) as payment_fee_mtd,
+    ROUND((deposits_prev_month + withdrawals_prev_month) * 0.08, 2) as payment_fee_prev_month,
+    ROUND((deposits_estimation + withdrawals_estimation) * 0.08, 2) as payment_fee_estimation,
+
+    -- PLATFORM FEE (1% of Cash GGR) - aligned with LTV report
     ROUND((cash_bets_yesterday - cash_wins_yesterday) * 0.01, 2) as platform_fee_yesterday,
     ROUND((cash_bets_mtd - cash_wins_mtd) * 0.01, 2) as platform_fee_mtd,
     ROUND((cash_bets_prev_month - cash_wins_prev_month) * 0.01, 2) as platform_fee_prev_month,
@@ -295,11 +308,11 @@ final_calculations AS (
 ngr_calculations AS (
   SELECT
     *,
-    -- NGR = Cash GGR - Platform Fee - Bonus Cost
-    (cash_ggr_yesterday - platform_fee_yesterday - bonus_cost_yesterday) as ngr_yesterday,
-    (cash_ggr_mtd - platform_fee_mtd - bonus_cost_mtd) as ngr_mtd,
-    (cash_ggr_prev_month - platform_fee_prev_month - bonus_cost_prev_month) as ngr_prev_month,
-    (cash_ggr_estimation - platform_fee_estimation - bonus_cost_estimation) as ngr_estimation
+    -- NGR = Cash GGR - Provider Fee (9%) - Payment Fee (8%) - Platform Fee (1%) - Bonus Cost (aligned with LTV report)
+    (cash_ggr_yesterday - provider_fee_yesterday - payment_fee_yesterday - platform_fee_yesterday - bonus_cost_yesterday) as ngr_yesterday,
+    (cash_ggr_mtd - provider_fee_mtd - payment_fee_mtd - platform_fee_mtd - bonus_cost_mtd) as ngr_mtd,
+    (cash_ggr_prev_month - provider_fee_prev_month - payment_fee_prev_month - platform_fee_prev_month - bonus_cost_prev_month) as ngr_prev_month,
+    (cash_ggr_estimation - provider_fee_estimation - payment_fee_estimation - platform_fee_estimation - bonus_cost_estimation) as ngr_estimation
   FROM final_calculations
 )
 
