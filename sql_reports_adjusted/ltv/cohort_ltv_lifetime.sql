@@ -1,9 +1,11 @@
-COHORT LTV LIFETIME REPORT - FINAL CORRECTED SQL
+COHORT LTV LIFETIME REPORT - ALIGNED WITH DAILY/EMAIL REPORTS
 Gaming/Casino Platform Analytics - WITH REVISED CALCULATIONS
 =============================================================================
 * FIX 1: Bulletproof Currency Logic - All monetary calculations now use the CASE statement for EUR conversion and handle NULLs.
 * FIX 2: Correct Hierarchical Sorting - The report now sorts with TOTAL on top, followed by the latest months.
 * FIX 3: All other filters (device, etc.) are standardized.
+* UPDATE (Nov 2025): Promo Bet/Win now use external_transaction_id IS NOT NULL (CTO-approved, aligned with daily/email reports)
+* NGR Formula: Cash GGR - Provider Fee (9%) - Payment Fee (8%) - Platform Fee (1%) - Bonus Cost
 */
 
 WITH 
@@ -111,15 +113,17 @@ deposit_withdrawal_metrics AS (
 
 /**
 ---------------------------------------------------------------------------
-STEP 6: GGR METRICS (WITH CURRENCY LOGIC)
+STEP 6: GGR METRICS (WITH CURRENCY LOGIC) - ALIGNED WITH DAILY/EMAIL REPORTS
 ---------------------------------------------------------------------------
 */
 ggr_metrics AS (
   SELECT pc.registration_month,
     COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'game_bet' AND t.balance_type = 'withdrawable' AND t.status = 'completed' THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS cash_bet,
     COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'game_bet' AND t.balance_type = 'withdrawable' AND t.status = 'completed' THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS cash_win,
-    COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'bonus' AND t.balance_type = 'non-withdrawable' AND t.status = 'completed' THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS promo_bet,
-    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'bonus' AND t.balance_type = 'non-withdrawable' AND t.status = 'completed' THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS promo_win
+    /* PROMO BET - Updated to use external_transaction_id per CTO requirements (aligned with daily/email reports) */
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'bonus' AND t.status = 'completed' AND t.external_transaction_id IS NOT NULL THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS promo_bet,
+    /* PROMO WIN - Updated to use external_transaction_id per CTO requirements (aligned with daily/email reports) */
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'bonus' AND t.status = 'completed' AND t.external_transaction_id IS NOT NULL THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS promo_win
   FROM player_cohorts pc
   LEFT JOIN transactions t ON pc.player_id = t.player_id
   WHERE 1=1
