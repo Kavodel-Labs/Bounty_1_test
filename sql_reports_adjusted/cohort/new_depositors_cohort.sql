@@ -115,6 +115,7 @@ ftd_all_deposits AS (
   WHERE t.transaction_category = 'deposit'
     AND t.transaction_type = 'credit'
     AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'  -- ✅ FIXED: Only real money deposits for FTD (CTO-approved)
 ),
 player_first_deposit AS (
   SELECT
@@ -124,11 +125,7 @@ player_first_deposit AS (
   FROM ftd_all_deposits fad
   INNER JOIN filtered_players fp ON fad.player_id = fp.player_id
   WHERE fad.deposit_rank = 1
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(fad.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    [[ AND ({{currency_filter}} = 'EUR' OR fad.currency_type IN ({{currency_filter}})) ]]  -- ✅ FIXED: Simplified currency filter (CTO-approved)
 ),
 
 /* Step 2: Count deposits WITHIN the cohort month for each FTD (ALIGNED WITH DAILY/MONTHLY) */
@@ -143,13 +140,10 @@ ftd_deposit_counts AS (
     AND t.transaction_type = 'credit'
     AND t.balance_type = 'withdrawable'
     AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'  -- ✅ FIXED: Only real money deposits for FTD (CTO-approved)
     AND DATE_TRUNC('month', t.created_at)::date = pfd.cohort_month
     -- Apply same currency filter (ALIGNED WITH DAILY/MONTHLY)
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(t.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    [[ AND ({{currency_filter}} = 'EUR' OR t.currency_type IN ({{currency_filter}})) ]]  -- ✅ FIXED: Simplified currency filter (CTO-approved)
   GROUP BY pfd.cohort_month, pfd.player_id
 ),
 

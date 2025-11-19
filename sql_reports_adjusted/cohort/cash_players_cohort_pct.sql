@@ -129,11 +129,7 @@ cohort_activity AS (
     AND t.status = 'completed'
     AND t.created_at >= fcb.first_cash_bet_date
     -- Apply same currency filter (ALIGNED WITH DAILY/MONTHLY)
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(t.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    [[ AND ({{currency_filter}} = 'EUR' OR t.currency_type IN ({{currency_filter}})) ]]  -- ✅ FIXED: Simplified currency filter (CTO-approved)
   GROUP BY fcb.first_cash_bet_month, DATE_TRUNC('month', t.created_at)
 ),
 

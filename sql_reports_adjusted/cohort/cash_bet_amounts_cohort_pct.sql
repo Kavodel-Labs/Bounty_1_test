@@ -112,10 +112,11 @@ cohort_bet_amounts AS (
     fcb.first_cash_bet_month as cohort_month,
     DATE_TRUNC('month', t.created_at) as activity_month,
     SUM(ABS(CASE
-      WHEN {{currency_filter}} = 'EUR'
-      THEN COALESCE(t.eur_amount, t.amount)
+      WHEN t.currency_type = {{currency_filter}} THEN t.amount
+      WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
       ELSE t.amount
-    END)) as total_amount_wagered,
+    END))  -- ✅ FIXED: 3-level currency hierarchy (CTO-approved)
+    as total_amount_wagered,
     EXTRACT(YEAR FROM AGE(DATE_TRUNC('month', t.created_at), fcb.first_cash_bet_month)) * 12 +
     EXTRACT(MONTH FROM AGE(DATE_TRUNC('month', t.created_at), fcb.first_cash_bet_month)) as months_since_first_bet
   FROM first_cash_bets fcb
@@ -126,11 +127,7 @@ cohort_bet_amounts AS (
     AND t.status = 'completed'
     AND t.created_at >= fcb.first_cash_bet_date
     -- Apply same currency filter (ALIGNED WITH DAILY/MONTHLY)
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(t.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    [[ AND ({{currency_filter}} = 'EUR' OR t.currency_type IN ({{currency_filter}})) ]]  -- ✅ FIXED: Simplified currency filter (CTO-approved)
   GROUP BY fcb.first_cash_bet_month, DATE_TRUNC('month', t.created_at)
 ),
 

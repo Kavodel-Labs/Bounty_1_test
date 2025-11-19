@@ -1,6 +1,7 @@
 -- =====================================================
--- BONUS REPORT DASHBOARD - CORRECTED v3.1
+-- BONUS REPORT DASHBOARD - CORRECTED v3.2 (CTO-APPROVED STANDARDS)
 -- FIXED: Duplicate rows removed + company filter removed
+-- FIXED: All currency calculations now use 3-level hierarchy (CTO-approved)
 -- 25 filters working correctly
 -- =====================================================
 
@@ -161,11 +162,12 @@ WITH pb_scope AS (
         CASE
           WHEN dep_tx_scope.transaction_category = 'deposit'
           AND dep_tx_scope.transaction_type = 'credit'
-          AND dep_tx_scope.status = 'completed' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(dep_tx_scope.eur_amount, dep_tx_scope.amount)
-            ELSE dep_tx_scope.amount 
+          AND dep_tx_scope.status = 'completed'
+          THEN CASE
+            -- ✅ FIXED: 3-level currency hierarchy (CTO-approved)
+            WHEN dep_tx_scope.currency_type = {{currency_filter}} THEN dep_tx_scope.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(dep_tx_scope.eur_amount, dep_tx_scope.amount)
+            ELSE dep_tx_scope.amount
           END
           ELSE 0
         END
@@ -183,11 +185,12 @@ WITH pb_scope AS (
           WHEN tx_scope_bonus.transaction_category = 'BO_DEPOSIT'
           AND tx_scope_bonus.transaction_type = 'credit'
           AND tx_scope_bonus.status = 'completed'
-          AND tx_scope_bonus.balance_type = 'withdrawable' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-            ELSE tx_scope_bonus.amount 
+          AND tx_scope_bonus.balance_type = 'withdrawable'
+          THEN CASE
+            -- ✅ FIXED: 3-level currency hierarchy (CTO-approved)
+            WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount
           END
           ELSE 0
         END
@@ -205,43 +208,44 @@ WITH pb_scope AS (
           WHEN tx_scope_bonus.transaction_category = 'bonus'
           AND tx_scope_bonus.transaction_type = 'credit'
           AND tx_scope_bonus.status = 'completed'
-          AND tx_scope_bonus.balance_type = 'non-withdrawable' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-            ELSE tx_scope_bonus.amount 
+          AND tx_scope_bonus.balance_type = 'non-withdrawable'
+          THEN CASE
+            -- ✅ FIXED: 3-level currency hierarchy (CTO-approved)
+            WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount
           END
-          
+
           WHEN tx_scope_bonus.transaction_category = 'free_spin_bonus'
           AND tx_scope_bonus.transaction_type = 'credit'
           AND tx_scope_bonus.status = 'completed'
-          AND tx_scope_bonus.balance_type = 'non-withdrawable' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-            ELSE tx_scope_bonus.amount 
+          AND tx_scope_bonus.balance_type = 'non-withdrawable'
+          THEN CASE
+            WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount
           END
-          
+
           WHEN tx_scope_bonus.transaction_category IN ('free_bet', 'free_bet_win', 'freebet_win')
           AND tx_scope_bonus.transaction_type = 'credit'
           AND tx_scope_bonus.status = 'completed'
-          AND tx_scope_bonus.balance_type = 'non-withdrawable' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-            ELSE tx_scope_bonus.amount 
+          AND tx_scope_bonus.balance_type = 'non-withdrawable'
+          THEN CASE
+            WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount
           END
-          
+
           WHEN tx_scope_bonus.transaction_category = 'bonus_completion'
           AND tx_scope_bonus.transaction_type = 'credit'
           AND tx_scope_bonus.status = 'completed'
-          AND tx_scope_bonus.balance_type = 'non-withdrawable' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-            ELSE tx_scope_bonus.amount 
+          AND tx_scope_bonus.balance_type = 'non-withdrawable'
+          THEN CASE
+            WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount
           END
-          
+
           ELSE 0
         END
       ) AS granted_bonus_amount
@@ -258,11 +262,12 @@ WITH pb_scope AS (
           WHEN tx_scope_bonus.transaction_category = 'bonus_completion'
           AND tx_scope_bonus.transaction_type = 'credit'
           AND tx_scope_bonus.status = 'completed'
-          AND tx_scope_bonus.balance_type = 'withdrawable' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-            ELSE tx_scope_bonus.amount 
+          AND tx_scope_bonus.balance_type = 'withdrawable'
+          THEN CASE
+            -- ✅ FIXED: 3-level currency hierarchy (CTO-approved)
+            WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount
           END
           ELSE 0
         END
@@ -298,11 +303,12 @@ WITH pb_scope AS (
           WHEN tx_scope_bonus.transaction_category = 'free_spin_bonus'
           AND tx_scope_bonus.transaction_type = 'credit'
           AND tx_scope_bonus.balance_type = 'non-withdrawable'
-          AND tx_scope_bonus.status = 'completed' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-            ELSE tx_scope_bonus.amount 
+          AND tx_scope_bonus.status = 'completed'
+          THEN CASE
+            -- ✅ FIXED: 3-level currency hierarchy (CTO-approved)
+            WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount
           END
           ELSE 0
         END
@@ -312,11 +318,11 @@ WITH pb_scope AS (
           WHEN tx_scope_bonus.transaction_category = 'free_spin_bonus'
           AND tx_scope_bonus.transaction_type = 'credit'
           AND tx_scope_bonus.balance_type = 'withdrawable'
-          AND tx_scope_bonus.status = 'completed' 
-          THEN CASE 
-            WHEN {{currency_filter}} = 'EUR' 
-            THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-            ELSE tx_scope_bonus.amount 
+          AND tx_scope_bonus.status = 'completed'
+          THEN CASE
+            WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+            WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+            ELSE tx_scope_bonus.amount
           END
           ELSE 0
         END
@@ -335,11 +341,12 @@ WITH pb_scope AS (
             WHEN tx_scope_bonus.transaction_category = 'bonus'
             AND tx_scope_bonus.transaction_type = 'credit'
             AND tx_scope_bonus.status = 'completed'
-            AND tx_scope_bonus.balance_type = 'withdrawable' 
-            THEN CASE 
-              WHEN {{currency_filter}} = 'EUR' 
-              THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-              ELSE tx_scope_bonus.amount 
+            AND tx_scope_bonus.balance_type = 'withdrawable'
+            THEN CASE
+              -- ✅ FIXED: 3-level currency hierarchy (CTO-approved)
+              WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+              WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+              ELSE tx_scope_bonus.amount
             END
             ELSE 0
           END
@@ -349,11 +356,11 @@ WITH pb_scope AS (
             WHEN tx_scope_bonus.transaction_category = 'bonus_completion'
             AND tx_scope_bonus.transaction_type = 'credit'
             AND tx_scope_bonus.status = 'completed'
-            AND tx_scope_bonus.balance_type = 'withdrawable' 
-            THEN CASE 
-              WHEN {{currency_filter}} = 'EUR' 
-              THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-              ELSE tx_scope_bonus.amount 
+            AND tx_scope_bonus.balance_type = 'withdrawable'
+            THEN CASE
+              WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+              WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+              ELSE tx_scope_bonus.amount
             END
             ELSE 0
           END
@@ -362,11 +369,11 @@ WITH pb_scope AS (
           CASE
             WHEN tx_scope_bonus.transaction_category IN ('free_bet_win', 'free_bet', 'freebet_win')
             AND tx_scope_bonus.transaction_type = 'credit'
-            AND tx_scope_bonus.status = 'completed' 
-            THEN CASE 
-              WHEN {{currency_filter}} = 'EUR' 
-              THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-              ELSE tx_scope_bonus.amount 
+            AND tx_scope_bonus.status = 'completed'
+            THEN CASE
+              WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+              WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+              ELSE tx_scope_bonus.amount
             END
             ELSE 0
           END
@@ -376,11 +383,11 @@ WITH pb_scope AS (
             WHEN tx_scope_bonus.transaction_category = 'BO_DEPOSIT'
             AND tx_scope_bonus.transaction_type = 'credit'
             AND tx_scope_bonus.status = 'completed'
-            AND tx_scope_bonus.balance_type = 'withdrawable' 
-            THEN CASE 
-              WHEN {{currency_filter}} = 'EUR' 
-              THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
-              ELSE tx_scope_bonus.amount 
+            AND tx_scope_bonus.balance_type = 'withdrawable'
+            THEN CASE
+              WHEN tx_scope_bonus.currency_type = {{currency_filter}} THEN tx_scope_bonus.amount
+              WHEN {{currency_filter}} = 'EUR' THEN COALESCE(tx_scope_bonus.eur_amount, tx_scope_bonus.amount)
+              ELSE tx_scope_bonus.amount
             END
             ELSE 0
           END
