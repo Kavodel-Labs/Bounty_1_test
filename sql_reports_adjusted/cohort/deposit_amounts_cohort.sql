@@ -87,6 +87,7 @@ ftd_all_deposits AS (
   WHERE t.transaction_category = 'deposit'
     AND t.transaction_type = 'credit'
     AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'  -- ✅ FIXED: Only real money deposits for FTD (CTO-approved)
 ),
 first_deposits AS (
   SELECT
@@ -98,11 +99,7 @@ first_deposits AS (
   WHERE fad.deposit_rank = 1
     AND fad.created_at >= (SELECT start_date FROM bounds)
     AND fad.created_at < (SELECT end_date FROM bounds) + INTERVAL '1 day'
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(fad.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    [[ AND ({{currency_filter}} = 'EUR' OR fad.currency_type IN ({{currency_filter}})) ]]  -- ✅ FIXED: Simplified currency filter (CTO-approved)
 ),
 
 /* Step 2: Calculate cohort sizes (for reference) */
@@ -120,10 +117,10 @@ cohort_deposit_amounts AS (
     fd.first_deposit_month as cohort_month,
     DATE_TRUNC('month', t.created_at) as activity_month,
     SUM(CASE
-      WHEN {{currency_filter}} = 'EUR'
-      THEN COALESCE(t.eur_amount, t.amount)
+      WHEN t.currency_type = {{currency_filter}} THEN t.amount
+      WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
       ELSE t.amount
-    END) as total_deposit_amount,
+    END)  -- ✅ FIXED: 3-level currency hierarchy (CTO-approved) as total_deposit_amount,
     COUNT(t.id) as total_deposits,
     COUNT(DISTINCT t.player_id) as unique_depositors
   FROM first_deposits fd
@@ -132,13 +129,10 @@ cohort_deposit_amounts AS (
     AND t.transaction_type = 'credit'
     AND t.balance_type = 'withdrawable'
     AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'  -- ✅ FIXED: Only real money deposits for FTD (CTO-approved)
     AND t.created_at >= fd.first_deposit_date
     -- Apply same currency filter (ALIGNED WITH DAILY/MONTHLY)
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(t.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    [[ AND ({{currency_filter}} = 'EUR' OR t.currency_type IN ({{currency_filter}})) ]]  -- ✅ FIXED: Simplified currency filter (CTO-approved)
   GROUP BY fd.first_deposit_month, DATE_TRUNC('month', t.created_at)
 ),
 

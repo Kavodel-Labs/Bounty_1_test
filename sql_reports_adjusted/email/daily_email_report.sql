@@ -1,16 +1,17 @@
 -- ===================================================
--- DAILY EMAIL REPORT - V10 (NGR Aligned with LTV)
+-- DAILY EMAIL REPORT - V11 (CTO-Approved Standards Applied)
 -- ===================================================
 -- Purpose: Aligned with daily_kpis.sql and LTV report calculations
 -- Added: Registrations, FTDs, Promo Bet/Win, Granted Bonus
 -- Updated: Promo Bet/Win use external_transaction_id IS NOT NULL (CTO-approved)
 -- Updated: Granted Bonus uses player_bonus_id IS NOT NULL
+-- Updated: FTD logic now includes balance_type = 'withdrawable' filter (CTO-approved)
 -- Updated: NGR now matches LTV formula with all fees
 -- Removed from output: Cash GGR Casino, GGR Casino, Turnover Casino, Platform Fee (fees calculated internally)
 -- NGR = Cash GGR - Provider Fee (9%) - Payment Fee (8%) - Platform Fee (1%) - Bonus Cost
 -- Hold% = Cash GGR / Cash Turnover × 100
+-- Currency: EUR (uses COALESCE(eur_amount, amount) fallback pattern)
 -- Updated: November 2025
--- Currency: EUR
 
 WITH temporal_calculations AS (
   SELECT
@@ -44,6 +45,7 @@ ftd_all_deposits AS (
   WHERE transaction_category = 'deposit'
     AND transaction_type = 'credit'
     AND status = 'completed'
+    AND balance_type = 'withdrawable'  -- ✅ ADDED: Only real money deposits for FTD
 ),
 ftd_calc AS (
   SELECT

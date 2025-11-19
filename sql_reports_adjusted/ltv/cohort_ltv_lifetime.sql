@@ -1,10 +1,13 @@
-COHORT LTV LIFETIME REPORT - ALIGNED WITH DAILY/EMAIL REPORTS
+COHORT LTV LIFETIME REPORT - ALIGNED WITH DAILY/EMAIL REPORTS (CTO-APPROVED STANDARDS)
 Gaming/Casino Platform Analytics - WITH REVISED CALCULATIONS
 =============================================================================
 * FIX 1: Bulletproof Currency Logic - All monetary calculations now use the CASE statement for EUR conversion and handle NULLs.
 * FIX 2: Correct Hierarchical Sorting - The report now sorts with TOTAL on top, followed by the latest months.
 * FIX 3: All other filters (device, etc.) are standardized.
 * UPDATE (Nov 2025): Promo Bet/Win now use external_transaction_id IS NOT NULL (CTO-approved, aligned with daily/email reports)
+* FIX 4: FTD logic now includes balance_type = 'withdrawable' filter (CTO-approved)
+* FIX 5: Currency filtering now uses simplified pattern: ({{currency_filter}} = 'EUR' OR t.currency_type IN ({{currency_filter}}))
+* FIX 6: All amount calculations now use 3-level currency hierarchy: native → EUR conversion → fallback
 * NGR Formula: Cash GGR - Provider Fee (9%) - Payment Fee (8%) - Platform Fee (1%) - Bonus Cost
 */
 
@@ -74,6 +77,7 @@ ftd_all_deposits AS (
   WHERE t.transaction_category = 'deposit'
     AND t.transaction_type = 'credit'
     AND t.status = 'completed'
+    AND t.balance_type = 'withdrawable'  -- ✅ FIXED: Only real money deposits for FTD
 ),
 ftd_data AS (
   SELECT
@@ -82,11 +86,8 @@ ftd_data AS (
   FROM ftd_all_deposits fad
   INNER JOIN player_cohorts pc ON fad.player_id = pc.player_id
   WHERE fad.deposit_rank = 1
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(fad.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    -- ✅ FIXED: Simplified currency filter (CTO-approved pattern)
+    [[ AND ({{currency_filter}} = 'EUR' OR fad.currency_type IN ({{currency_filter}})) ]]
 ),
 
 /**
@@ -96,18 +97,24 @@ STEP 5: DEPOSIT & WITHDRAWAL METRICS (ALIGNED WITH DAILY/MONTHLY)
 */
 deposit_withdrawal_metrics AS (
   SELECT pc.registration_month,
+    -- ✅ FIXED: 3-level currency hierarchy (CTO-approved pattern)
     COALESCE(SUM(CASE WHEN t.transaction_category = 'deposit' AND t.transaction_type = 'credit' AND t.status = 'completed' AND t.balance_type = 'withdrawable'
-      THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS total_deposits,
+      THEN CASE
+        WHEN t.currency_type = {{currency_filter}} THEN t.amount
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END END), 0) AS total_deposits,
     COALESCE(SUM(CASE WHEN t.transaction_category = 'withdrawal' AND t.transaction_type = 'debit' AND t.status = 'completed' AND t.balance_type = 'withdrawable'
-      THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS total_withdrawals
+      THEN ABS(CASE
+        WHEN t.currency_type = {{currency_filter}} THEN t.amount
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END) END), 0) AS total_withdrawals
   FROM player_cohorts pc
   LEFT JOIN transactions t ON pc.player_id = t.player_id
   WHERE 1=1
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(t.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    -- ✅ FIXED: Simplified currency filter (CTO-approved pattern)
+    [[ AND ({{currency_filter}} = 'EUR' OR t.currency_type IN ({{currency_filter}})) ]]
   GROUP BY pc.registration_month
 ),
 
@@ -118,20 +125,38 @@ STEP 6: GGR METRICS (WITH CURRENCY LOGIC) - ALIGNED WITH DAILY/EMAIL REPORTS
 */
 ggr_metrics AS (
   SELECT pc.registration_month,
-    COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'game_bet' AND t.balance_type = 'withdrawable' AND t.status = 'completed' THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS cash_bet,
-    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'game_bet' AND t.balance_type = 'withdrawable' AND t.status = 'completed' THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS cash_win,
+    -- ✅ FIXED: 3-level currency hierarchy for cash bets/wins
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'game_bet' AND t.balance_type = 'withdrawable' AND t.status = 'completed'
+      THEN ABS(CASE
+        WHEN t.currency_type = {{currency_filter}} THEN t.amount
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END) END), 0) AS cash_bet,
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'game_bet' AND t.balance_type = 'withdrawable' AND t.status = 'completed'
+      THEN CASE
+        WHEN t.currency_type = {{currency_filter}} THEN t.amount
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END END), 0) AS cash_win,
     /* PROMO BET - Updated to use external_transaction_id per CTO requirements (aligned with daily/email reports) */
-    COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'bonus' AND t.status = 'completed' AND t.external_transaction_id IS NOT NULL THEN ABS(CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END) END), 0) AS promo_bet,
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'debit' AND t.transaction_category = 'bonus' AND t.status = 'completed' AND t.external_transaction_id IS NOT NULL
+      THEN ABS(CASE
+        WHEN t.currency_type = {{currency_filter}} THEN t.amount
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END) END), 0) AS promo_bet,
     /* PROMO WIN - Updated to use external_transaction_id per CTO requirements (aligned with daily/email reports) */
-    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'bonus' AND t.status = 'completed' AND t.external_transaction_id IS NOT NULL THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS promo_win
+    COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'bonus' AND t.status = 'completed' AND t.external_transaction_id IS NOT NULL
+      THEN CASE
+        WHEN t.currency_type = {{currency_filter}} THEN t.amount
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END END), 0) AS promo_win
   FROM player_cohorts pc
   LEFT JOIN transactions t ON pc.player_id = t.player_id
   WHERE 1=1
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(t.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    -- ✅ FIXED: Simplified currency filter (CTO-approved pattern)
+    [[ AND ({{currency_filter}} = 'EUR' OR t.currency_type IN ({{currency_filter}})) ]]
   GROUP BY pc.registration_month
 ),
 
@@ -142,16 +167,18 @@ STEP 7: BONUS COST METRICS (WITH CURRENCY LOGIC)
 */
 bonus_cost_metrics AS (
   SELECT pc.registration_month,
+    -- ✅ FIXED: 3-level currency hierarchy for bonus cost
     COALESCE(SUM(CASE WHEN t.transaction_type = 'credit' AND t.transaction_category = 'bonus_completion' AND t.status = 'completed' AND t.balance_type = 'withdrawable'
-      THEN CASE WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount) ELSE t.amount END END), 0) AS total_bonus_cost
+      THEN CASE
+        WHEN t.currency_type = {{currency_filter}} THEN t.amount
+        WHEN {{currency_filter}} = 'EUR' THEN COALESCE(t.eur_amount, t.amount)
+        ELSE t.amount
+      END END), 0) AS total_bonus_cost
   FROM player_cohorts pc
   LEFT JOIN transactions t ON pc.player_id = t.player_id
   WHERE 1=1
-    [[ AND CASE
-      WHEN {{currency_filter}} != 'EUR'
-      THEN UPPER(t.currency_type) IN ({{currency_filter}})
-      ELSE TRUE
-    END ]]
+    -- ✅ FIXED: Simplified currency filter (CTO-approved pattern)
+    [[ AND ({{currency_filter}} = 'EUR' OR t.currency_type IN ({{currency_filter}})) ]]
   GROUP BY pc.registration_month
 ),
 
